@@ -9,7 +9,6 @@ We verify:
   - The agent has the expected public interface (.invoke, .stream).
 """
 
-from unittest.mock import MagicMock
 
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
@@ -56,7 +55,7 @@ class TestBuildAgent:
     def test_build_with_multiple_tools(self) -> None:
         """Agent should accept the full tool suite."""
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
-        from gem_agentic_ai.tools import web_search, calculate_multiplication
+        from gem_agentic_ai.tools import calculate_multiplication, web_search
 
         agent = build_agent(
             llm,

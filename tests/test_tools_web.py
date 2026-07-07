@@ -101,12 +101,7 @@ class TestWebSearchFormattingPaths:
         the DDGS attribute.
         """
 
-        class NoDDGS_Module(types.ModuleType):
-            """Module with no DDGS attribute — causes ImportError on from-import."""
-
-        restore = _patch_duckduckgo(MockDDGSBase)
-        # But this time our mock module won't have DDGS...
-        # Actually, let's just put a module without DDGS into sys.modules.
+        # A module without DDGS attribute causes ImportError on from-import.
         original_ddgs = sys.modules.get("duckduckgo_search")
         fake = types.ModuleType("duckduckgo_search")
         # Deliberately NOT setting DDGS

@@ -16,10 +16,9 @@ from datetime import datetime
 
 import pytest
 
-from gem_agentic_ai.tools.system import get_system_time, calculate_multiplication
 from gem_agentic_ai.tools.database import query_employee_database
+from gem_agentic_ai.tools.system import calculate_multiplication, get_system_time
 from gem_agentic_ai.tools.web import web_search
-
 
 # ======================================================================
 # SYSTEM TOOLS

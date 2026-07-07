@@ -8,10 +8,8 @@ are not covered by the unit tests for individual helper functions.
 import logging
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from gem_agentic_ai.main import _configure_logging, main, parse_args
 from gem_agentic_ai.config import settings
+from gem_agentic_ai.main import _configure_logging, main
 
 
 class TestConfigureLogging:

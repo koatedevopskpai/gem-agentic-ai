@@ -36,6 +36,8 @@ import uuid
 
 from langchain_openai import ChatOpenAI
 
+from gem_agentic_ai.agent.graph import build_agent
+from gem_agentic_ai.agent.simple import run_simple_agent
 from gem_agentic_ai.config import settings
 from gem_agentic_ai.tools import (
     calculate_multiplication,
@@ -43,8 +45,6 @@ from gem_agentic_ai.tools import (
     query_employee_database,
     web_search,
 )
-from gem_agentic_ai.agent.graph import build_agent
-from gem_agentic_ai.agent.simple import run_simple_agent
 
 logger = logging.getLogger(__name__)
 

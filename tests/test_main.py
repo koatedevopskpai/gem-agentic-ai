@@ -8,7 +8,7 @@ The full main() function is not tested here because it constructs
 agents that require an API key — that is an integration concern.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -19,8 +19,6 @@ from gem_agentic_ai.main import (
     _get_tools_by_name,
     parse_args,
 )
-from gem_agentic_ai.config import settings
-
 
 # ======================================================================
 # ARGUMENT PARSING

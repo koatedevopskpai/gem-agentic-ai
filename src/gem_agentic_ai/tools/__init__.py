@@ -3,9 +3,9 @@
 # if a new domain emerges. Every tool is decorated with @tool from langchain_core,
 # making them compatible with both the simple ReAct loop and the LangGraph agent.
 
-from gem_agentic_ai.tools.system import get_system_time, calculate_multiplication
-from gem_agentic_ai.tools.web import web_search
 from gem_agentic_ai.tools.database import query_employee_database
+from gem_agentic_ai.tools.system import calculate_multiplication, get_system_time
+from gem_agentic_ai.tools.web import web_search
 
 __all__ = [
     "get_system_time",

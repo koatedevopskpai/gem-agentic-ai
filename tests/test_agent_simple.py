@@ -15,7 +15,6 @@ needing an actual LLM API key.
 
 from unittest.mock import MagicMock
 
-import pytest
 from langchain_core.messages import AIMessage
 
 from gem_agentic_ai.agent.simple import run_simple_agent
