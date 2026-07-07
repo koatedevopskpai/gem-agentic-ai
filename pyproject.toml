@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "gem-agentic-ai"
@@ -36,6 +36,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.coverage.run]
+source = ["src/gem_agentic_ai"]
+omit = ["src/gem_agentic_ai/__main__.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
