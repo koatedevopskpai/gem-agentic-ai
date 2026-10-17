@@ -69,13 +69,19 @@ venv\Scripts\activate
 # macOS/Linux:
 source venv/bin/activate
 
-# 2. Install dependencies
-pip install -r requirements.txt
+# 2. Install pinned dependencies and the package itself
+pip install -r requirements-dev.txt
+pip install --no-deps -e .        # src layout: required for `import gem_agentic_ai`
 
-# 3. Configure your API key
+# 3. Configure your API key (only needed for live model runs)
 cp .env.example .env
 # Edit .env and add your OPENAI_API_KEY
 ```
+
+`requirements.txt` pins the runtime versions used in CI. `pip install -e ".[dev]"`
+also works, but it resolves the newest matching versions rather than the
+pinned set. See [docs/CLEAN_CHECKOUT.md](docs/CLEAN_CHECKOUT.md) for the
+verified baseline.
 
 ### Usage
 
