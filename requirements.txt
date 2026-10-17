@@ -8,5 +8,8 @@ langgraph-checkpoint-sqlite==3.1.2
 duckduckgo_search==8.1.1
 pydantic-settings==2.14.1
 pydantic==2.13.4
+# Model Context Protocol SDK. The server and the bridge pin the protocol
+# revision they negotiate; see src/gem_agentic_ai/mcp_tools/client.py.
+mcp==2.3.0
 fastapi==0.143.3
 uvicorn==0.54.0

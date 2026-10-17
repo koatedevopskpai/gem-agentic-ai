@@ -257,6 +257,54 @@ native code, container-grade isolation).
 
 ---
 
+## MCP Tool Server
+
+`mcp_tools/` is a real [Model Context Protocol](https://modelcontextprotocol.io)
+server and the client bridge the agent uses to call it. The server speaks MCP
+over stdio — newline-delimited JSON-RPC 2.0 with the `initialize` handshake,
+`tools/list` and `tools/call` — not an HTTP endpoint with an MCP-shaped name.
+The protocol revision is pinned at `2025-11-25` (`mcp==2.3.0`), and the bridge
+refuses to continue if the server negotiates anything else.
+
+Two read-only tools are exposed, confined to one allow-listed directory:
+
+| Tool | Arguments | Returns |
+|------|-----------|---------|
+| `search_files` | `query`, optional `glob_pattern`, `max_results` | Matching lines with relative paths; binary and oversized files skipped |
+| `read_file` | `path`, optional `max_bytes` | The file's text and whether it was truncated |
+
+Start the server on its own, or drive it through the bridge:
+
+```bash
+python -m gem_agentic_ai.mcp_tools --root .
+```
+
+```python
+import asyncio
+from gem_agentic_ai.mcp_tools import MCPToolset, ServerConfig
+
+async def main():
+    async with MCPToolset(ServerConfig(root=".")) as toolset:
+        print(toolset.protocol_version)               # 2025-11-25
+        print([tool.name for tool in toolset.tools])  # ['search_files', 'read_file']
+        print(await toolset.call_tool("search_files", {"query": "checkpoint"}))
+
+asyncio.run(main())
+```
+
+`toolset.tools` are LangChain tools, so the existing agent uses them without
+a special path: `build_agent(llm, toolset.tools)`. Their argument models are
+generated from each tool's MCP `inputSchema`, which is what lets `ToolGuard`
+validate every call. A tool error comes back as `isError: true` and reaches
+the model as an error `ToolMessage`; it does not end the run.
+
+The root is a path boundary, not a sandbox: absolute paths, `..` components
+and symlinks that resolve outside the root are refused, but the process is a
+normal child of the caller. Errors, limits and the full design are in
+[docs/A06.md](docs/A06.md).
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -349,6 +397,11 @@ src/gem_agentic_ai/
 │   ├── web.py           # DuckDuckGo web search
 │   ├── database.py      # In-memory SQLite employee database
 │   └── actions.py       # Consequential demo action (approval + idempotency)
+├── mcp_tools/
+│   ├── __init__.py      # MCP server and bridge exports
+│   ├── server.py        # Real MCP server over stdio; two confined read-only tools
+│   ├── client.py        # MCPToolset / MCPTool: discovery, schema conversion, tools/call
+│   └── __main__.py      # python -m gem_agentic_ai.mcp_tools --root <dir>
 ├── agent/
 │   ├── __init__.py      # Agent registry / re-exports
 │   ├── simple.py        # Manual ReAct loop

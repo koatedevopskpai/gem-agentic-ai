@@ -453,3 +453,78 @@ api/__main__.py
 ```
 
 Key property: **arrows point in the direction of dependency.** Tools never import agents. Agents never import specific tools. Configuration is imported by everything but imports nothing (except pydantic-settings).
+
+---
+
+## ADR-15: MCP as a Process Boundary, Not an In-Process Function Call
+
+**Status:** Accepted
+
+**Note on numbering:** A05 (in review) introduces ADR-14, so this branch
+uses the next number. If A05 is dropped, renumbering this to ADR-14 is a
+cosmetic change.
+
+**Context:** The tool library is in-process: `ToolGuard` wraps a Python
+function and executes it. That works for functions the application owns, but
+it proves nothing about the Model Context Protocol, and it gives the tool the
+agent process's full access. The requirement is an MCP server: a separate
+program that speaks JSON-RPC over stdio, advertises its tools with
+`tools/list`, and executes them with `tools/call`. An HTTP endpoint with
+MCP-shaped JSON is not that.
+
+**Decision:** `mcp_tools/server.py` is an MCP server built on the official
+Python SDK (`mcp==2.3.0`), launched as a subprocess over stdio at a pinned
+protocol revision (`2025-11-25`, forced through the `initialize` handshake).
+`mcp_tools/client.py` discovers its tools with `tools/list`, converts each
+`inputSchema` into a Pydantic model, and exposes it to the agent as a
+LangChain `BaseTool` whose implementation is `tools/call`:
+
+- Both tools are read-only and confined to one `--root` directory. Absolute
+  paths, `..` components and symlinks that resolve outside the root are
+  refused; files above 1 MB and binary files are skipped or refused.
+- A deliberate refusal raises the SDK's `ToolError`, which the protocol
+  carries as `isError: true` with the message intact. The bridge raises
+  `MCPToolError`; `ToolGuard` turns it into a `ToolMessage` with
+  `status="error"`. The model sees the failure; the run does not end.
+- The bridge refuses any negotiated revision other than the one it pins, and
+  refuses an `inputSchema` it cannot convert to a validating model. Both are
+  discovery-time failures, not degraded execution.
+- The agent path gives each tool call its own short-lived session, because
+  `ToolGuard` executes calls on worker threads with timeouts and an MCP
+  session belongs to one event loop. The shared session is used for direct
+  async calls.
+
+**Rationale:**
+- **The protocol is the demonstration.** Framing, handshake, capability
+  negotiation and tool discovery are exercised by tests that write raw
+  JSON-RPC to the subprocess's stdin as well as by the SDK client.
+- **A separate process is the honest boundary.** The server's root is the
+  only tree it will read from, and a crash in the server is a failed call,
+  not a failed agent.
+- **Fail closed.** An unknown revision, an unrepresentable schema or a
+  refused path stops the operation; nothing is silently substituted.
+- **Reuse, not a second policy.** The MCP tool is a normal `BaseTool`, so
+  the guard's validation, allowlist, budgets and audit trail apply unchanged.
+
+**Rejected alternatives:**
+- **Calling the tool functions directly from the agent.** No protocol, and no
+  boundary; this is the thing the task exists to replace.
+- **FastAPI/HTTP endpoint returning JSON.** Not MCP. Streamable HTTP is a
+  real MCP transport, but it would demonstrate HTTP plumbing rather than the
+  protocol, and the brief explicitly warns against presenting an HTTP
+  endpoint as MCP.
+- **A dict `inputSchema` passed straight to LangChain.** `ToolGuard` refuses
+  tools without a Pydantic model, and a dict would bypass validation. The
+  conversion is the fail-closed choice.
+- **One shared MCP session for the whole agent run.** It cannot be used from
+  the guard's worker threads without moving the session's event loop into
+  another thread. Per-call sessions cost a process spawn and keep the
+  threading model clear.
+
+**Trade-offs and boundaries:**
+- Per-call spawns are visible in the demo's timings. This is a portfolio
+  server, not a pooled production deployment.
+- The root is a path check, not a sandbox; a TOCTOU symlink swap is possible
+  and the documents say so. Process-level isolation is K01's territory.
+- Tools only: no resources, prompts, sampling, elicitation or notifications.
+- stdio only: no remote transport, authentication or multi-tenancy.
