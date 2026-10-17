@@ -418,11 +418,11 @@ if os.name == "posix":  # pragma: no cover - exercised on POSIX only
             super().__init__(daemon=True)
             self._pgid = pgid
             self._limit_mb = limit_mb
-            self._stop = threading.Event()
+            self._stop_event = threading.Event()
             self.exceeded = False
 
         def run(self) -> None:
-            while not self._stop.wait(0.05):
+            while not self._stop_event.wait(0.05):
                 if _group_rss_mb(self._pgid) > self._limit_mb:
                     self.exceeded = True
                     try:
@@ -432,7 +432,7 @@ if os.name == "posix":  # pragma: no cover - exercised on POSIX only
                     return
 
         def stop(self) -> None:
-            self._stop.set()
+            self._stop_event.set()
             self.join(timeout=1.0)
 
 
