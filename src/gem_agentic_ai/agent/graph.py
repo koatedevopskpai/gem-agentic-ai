@@ -105,8 +105,19 @@ class BoundedAgent:
 
     async def astream(self, input: Any, config: Any = None, **kwargs: Any):
         self.guard.reset()
-        async for event in self._graph.astream(input, config, **kwargs):
-            yield event
+        stream = self._graph.astream(input, config, **kwargs)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            # Close the graph's generator explicitly. A consumer that is
+            # cancelled or closed above this wrapper otherwise leaves the
+            # inner generator to the async-generator finaliser, which is not
+            # prompt and, in practice, did not stop a running model node:
+            # tokens kept arriving after the caller had gone. Closing it here
+            # throws ``GeneratorExit`` into LangGraph, whose execution loop
+            # then cancels the node tasks that were still in flight.
+            await stream.aclose()
 
     def __getattr__(self, item: str) -> Any:
         return getattr(self._graph, item)
