@@ -144,6 +144,13 @@ class TestOwnership:
             with pytest.raises(ThreadAccessError, match="user_id"):
                 memory.checkpointer.get_tuple(unscoped)
 
+    def test_a_config_without_a_thread_is_refused(self, tmp_path: Path) -> None:
+        with DurableMemory(tmp_path) as memory:
+            with pytest.raises(ThreadAccessError, match="thread_id"):
+                memory.checkpointer.get_tuple(
+                    {"configurable": {"user_id": "alice"}}
+                )
+
     def test_an_unregistered_thread_id_is_refused(self, tmp_path: Path) -> None:
         with DurableMemory(tmp_path) as memory:
             with pytest.raises(ThreadAccessError, match="not owned"):
@@ -320,3 +327,12 @@ class TestScopeValidation:
                 memory.config("  ", "support-1")
             with pytest.raises(ValueError, match="thread_key"):
                 memory.config("alice", "")
+
+    def test_config_specs_are_delegated(self, tmp_path: Path) -> None:
+        with DurableMemory(tmp_path) as memory:
+            assert isinstance(memory.checkpointer.config_specs, list)
+
+    def test_close_is_idempotent(self, tmp_path: Path) -> None:
+        memory = DurableMemory(tmp_path)
+        memory.close()
+        memory.close()
