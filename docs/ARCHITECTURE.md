@@ -238,6 +238,73 @@ This document captures the key architectural decisions made during the design of
 
 ---
 
+## ADR-12: An Isolated Runner for One Bounded Coding Task
+
+**Status:** Accepted
+
+**Context:** ADR-11 records the limit of an in-process execution policy: a
+timeout stops the guard waiting, but it cannot kill a Python thread, and it
+bounds nothing about memory, files, child processes or the environment. Code
+written by a model needs a process boundary before it can be executed at all.
+
+**Decision:** `sandbox.py` runs a candidate `solution.py` against trusted
+acceptance tests in a fresh interpreter, in a temporary directory:
+
+- A stdin handshake: the child starts, waits for one line, and only then
+  imports anything. The launcher attaches the OS limits during that window, so
+  no candidate code runs before the limits are in force.
+- Windows: a Job Object with per-process user-time, process-memory,
+  job-memory, active-process and kill-on-close limits. POSIX: `RLIMIT_CPU`,
+  `RLIMIT_FSIZE`, a new session, process-group kill, and an RSS watchdog.
+- A scrubbed environment rebuilt from an allowlist, with secret-looking names
+  dropped and HOME/TEMP/USERPROFILE pointing into the sandbox.
+- A Python audit hook inside the child that refuses writes outside the
+  sandbox root, refuses network access unless explicitly allowed, and refuses
+  child processes.
+- A per-run nonce sent over stdin: only a report line carrying it is accepted.
+  A missing or forged report is `killed`, never `passed`.
+
+`coding_task.py` supplies the one task (a pure `slugify` function) and the
+independent acceptance tests that define success.
+
+**Rationale:**
+- **Process boundary first:** memory, CPU and process limits are OS facts, not
+  Python promises. The sample cannot talk its way out of them.
+- **Least capability for the task:** a pure function needs no network, no
+  child process and no host file access, so denying them costs a correct
+  solution nothing.
+- **Fail closed:** if the job cannot be attached, the run is aborted. If the
+  child dies without a nonce-tagged report — including `os._exit(0)` — the
+  result is `killed`, not success.
+- **Honest scope:** the audit-hook controls are cooperative and the docs say
+  so. Result forgery by an in-process sample is acknowledged and left to K02.
+
+**Rejected alternatives:**
+- **`subprocess` with a timeout:** the problem statement. It stops one
+  process and enforces nothing else.
+- **In-process `exec` with patched builtins:** reversible by the sample, and a
+  crash takes the host with it.
+- **`RLIMIT_AS` for memory:** counts virtual address space; a limit low enough
+  to matter breaks interpreter startup on 64-bit Linux. The RSS watchdog is
+  sampled enforcement instead, with that limitation stated.
+- **`CREATE_SUSPENDED` on Windows:** would require reimplementing the whole
+  spawn path to keep the pipes and environment; the stdin handshake gives the
+  same ordering with `Popen`.
+- **Docker/nsjail:** stronger, but not available hermetically on the target
+  machines; `run_python` leaves room for a future backend.
+
+**Trade-offs and boundaries:**
+- Audit hooks are not a security boundary against `ctypes` or native code.
+- Reads are unrestricted; only writes are checked.
+- POSIX memory enforcement is sampled every 50 ms, and process count is not
+  capped there (children are killed with the group).
+- A sample that introspects the harness can read the nonce; result integrity
+  against adversarial code is K02's problem, not this task's.
+- The interpreter runs with `-I -S -B`: stdlib only, no site-packages, no
+  bytecode writes.
+
+---
+
 ## Component Dependency Graph
 
 ```
@@ -255,6 +322,9 @@ main.py
 guard.py
   ├── bounds.py          (limits, budget, stop reasons)
   └── idempotency.py     (in-memory and SQLite stores)
+
+coding_task.py
+  └── sandbox.py         (stdlib only; spawns an isolated interpreter)
 ```
 
 Key property: **arrows point in the direction of dependency.** Tools never import agents. Agents never import specific tools. Configuration is imported by everything but imports nothing (except pydantic-settings).
