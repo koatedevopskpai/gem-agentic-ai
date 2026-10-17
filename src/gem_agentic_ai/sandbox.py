@@ -594,6 +594,8 @@ def run_python(
             failed = [test for test in tests if not test.passed]
             if import_error:
                 status, error = "error", str(import_error)
+            elif not tests:
+                status, error = "error", "no acceptance tests were found"
             elif failed:
                 status, error = "failed", f"{len(failed)} of {len(tests)} tests failed"
             else:

@@ -296,8 +296,9 @@ independent acceptance tests that define success.
 **Trade-offs and boundaries:**
 - Audit hooks are not a security boundary against `ctypes` or native code.
 - Reads are unrestricted; only writes are checked.
-- POSIX memory enforcement is sampled every 50 ms, and process count is not
-  capped there (children are killed with the group).
+- POSIX memory enforcement is sampled every 50 ms from `/proc` (so Linux
+  only), and process count is not capped there (children are killed with the
+  group).
 - A sample that introspects the harness can read the nonce; result integrity
   against adversarial code is K02's problem, not this task's.
 - The interpreter runs with `-I -S -B`: stdlib only, no site-packages, no

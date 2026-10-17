@@ -95,6 +95,12 @@ def test_c_passes():
     assert "AssertionError" in (result.tests[1].error or "")
 
 
+def test_no_acceptance_tests_is_an_error_not_a_pass():
+    result = run_python("def value():\n    return 1\n", "# no test functions here\n")
+    assert result.status == "error"
+    assert "no acceptance tests" in (result.error or "")
+
+
 def test_syntax_error_is_reported_as_an_error():
     tests_source = "from solution import broken\n\n\ndef test_imports():\n    assert broken\n"
     result = run_python("def broken(:\n    pass\n", tests_source)
