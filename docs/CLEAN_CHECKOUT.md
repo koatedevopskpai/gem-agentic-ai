@@ -1,14 +1,15 @@
 # Clean-checkout baseline
 
 Recorded 17 October 2026. Originally written for task **C03** of the
-portfolio improvement backlog; updated for **A03**. The purpose is to prove
-that another engineer can install and run the offline example from a fresh
-clone, without credentials and without a local `.env`.
+portfolio improvement backlog; updated for **A03** and **A02**. The purpose
+is to prove that another engineer can install and run the offline example
+from a fresh clone, without credentials and without a local `.env`.
 
 | Task | Base commit | Branch |
 |---|---|---|
 | C03 | `8be104b` | `task/C03-clean-checkout-baseline` |
 | A03 | `d3eed0f` | `task/A03-bounded-tool-execution` |
+| A02 | `90716a2` (A03 head) | `task/A02-durable-memory` |
 
 ## Runtime
 
@@ -39,6 +40,7 @@ langchain==1.3.8
 langchain-core==1.4.6
 langchain-openai==1.3.0
 langgraph==1.2.4
+langgraph-checkpoint-sqlite==3.1.2
 duckduckgo_search==8.1.1
 pydantic==2.13.4
 pydantic-settings==2.14.1
@@ -84,7 +86,25 @@ Command:
 python -m pytest -m "not integration" -q
 ```
 
-### A03 (current)
+### A02 (current)
+
+Result on 17 October 2026, CPython 3.11.9, venv with the pinned dependencies
+including `langgraph-checkpoint-sqlite==3.1.2`, no `.env`:
+
+```
+collected 146 items / 1 deselected / 145 selected
+145 passed, 1 deselected in 7.97s
+TOTAL  868 statements  55 missed  94%
+```
+
+The new module in this task is `persistence.py` (98%). A03's modules remain
+at `bounds.py` (98%), `guard.py` (93%), `idempotency.py` (100%) and
+`tools/actions.py` (100%). `main.py` remains at 76% because the interactive
+`run_chat` / `run_simple_demo` bodies are not executed; `agent/graph.py` is
+at 82% because the async and streaming wrappers are not exercised. Coverage
+is reported, not gated.
+
+### A03 (previous)
 
 Result on 17 October 2026, CPython 3.11.9, clean venv with the pinned
 dependencies, no `.env`:
@@ -95,11 +115,8 @@ collected 129 items / 1 deselected / 128 selected
 TOTAL  702 statements  52 missed  93%
 ```
 
-The new modules are `bounds.py` (98%), `guard.py` (93%),
-`idempotency.py` (100%) and `tools/actions.py` (100%). `main.py` remains at
-76% because the interactive `run_chat` / `run_simple_demo` bodies are not
-executed; `agent/graph.py` is at 82% because the async and streaming wrappers
-are not exercised. Coverage is reported, not gated.
+The modules added by A03 are `bounds.py`, `guard.py`, `idempotency.py` and
+`tools/actions.py`.
 
 ### C03 (historical)
 

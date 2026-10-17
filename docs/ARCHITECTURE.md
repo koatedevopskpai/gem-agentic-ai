@@ -238,6 +238,42 @@ This document captures the key architectural decisions made during the design of
 
 ---
 
+## ADR-12: Durable Memory with an Enforced User Boundary
+
+**Status:** Accepted
+
+**Context:** `MemorySaver` keeps checkpoints in a dictionary, so a conversation ends with the process. It is also keyed only by the caller's `thread_id`: nothing verifies which user a thread belongs to. A service that accepts a thread id from a request could therefore resume a foreign conversation. Durability and scoping have to be solved together, because durable storage makes an ownership mistake persistent.
+
+**Decision:** Add `DurableMemory` (persistence.py), which combines three pieces:
+
+- `SqliteSaver` over a local SQLite file stores LangGraph checkpoints.
+- A `thread_registry` table maps `(user_id, thread_key)` to a random, opaque storage id, with creation and last-use times.
+- `_ScopedCheckpointer` wraps the saver and authorises every `get_tuple`, `list`, `put` and `put_writes` against that registry. A config missing either value, or naming a pair that is not registered, raises `ThreadAccessError`.
+
+Deletion is only available as `DurableMemory.delete_thread(user_id, thread_key)`, because the saver's `delete_thread(thread_id)` has no user context. Retention is an explicit `sweep_expired()` over `last_used_at`; opening the store never deletes data. `memory.guard()` supplies a `ToolGuard` whose SQLite idempotency records sit beside the checkpoints, so a replayed step does not repeat a completed action.
+
+**Rationale:**
+- **Fail closed:** The graph cannot read or write a thread whose config does not carry a registered pair. A forgotten call-site check cannot expose a conversation.
+- **Opaque ids:** Knowing another user's thread key does not yield a usable storage id.
+- **Durability where it is needed:** Checkpoints and completed actions survive a restart; approval decisions deliberately do not, because they record a human decision rather than conversation state.
+- **Local and free:** One SQLite file, no service, no credentials. The scoped wrapper is not tied to SQLite in principle.
+- **Observable lifecycle:** Listing, deletion and retention return records rather than acting silently.
+
+**Rejected alternatives:**
+- **Embed the user in the thread id (`alice:support-1`):** Any caller can construct one, and it leaks the user id into logs and keys. Nothing verifies the prefix.
+- **Enforce ownership only at the call site:** One missed check resumes a foreign conversation, and durability makes the mistake permanent.
+- **A JSON file per thread:** No atomic multi-key writes or ordered pending writes; rebuilding what the SQLite saver already provides is wasted effort.
+- **Auto-sweep on open:** Convenient and surprising. Deletion should be schedulable and auditable.
+
+**Trade-offs and boundaries:**
+- One SQLite file on one host. This is not a distributed store or a cross-host lock.
+- Ownership is only as strong as the `user_id` the application supplies; the checkpointer cannot authenticate a user.
+- The directory is not encrypted. Filesystem access bypasses the boundary.
+- The sync saver has no async implementation; `ainvoke` / `astream` are unsupported with this checkpointer at this version.
+- A crash after an external side effect but before the idempotency write repeats the action on replay. The store narrows the window; it does not close the dual-write gap, and tools without a stable action key remain at-least-once. `docs/A02.md` lists what is restart-safe and what needs reconciliation.
+
+---
+
 ## Component Dependency Graph
 
 ```
@@ -255,6 +291,12 @@ main.py
 guard.py
   ├── bounds.py          (limits, budget, stop reasons)
   └── idempotency.py     (in-memory and SQLite stores)
+
+persistence.py
+  ├── langgraph.checkpoint.sqlite  (SqliteSaver)
+  ├── bounds.py                    (ToolLimits for guard())
+  ├── guard.py                     (ToolGuard)
+  └── idempotency.py               (SqliteIdempotencyStore)
 ```
 
 Key property: **arrows point in the direction of dependency.** Tools never import agents. Agents never import specific tools. Configuration is imported by everything but imports nothing (except pydantic-settings).
