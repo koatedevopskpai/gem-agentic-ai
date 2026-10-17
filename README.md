@@ -53,6 +53,7 @@ idempotency and explicit approval for consequential actions. See
 | Agent orchestration | LangGraph `create_agent` | Formal state machine with persistence and streaming |
 | Tool execution | Shared `ToolGuard` | One policy for both agent paths: validate, bound, approve, de-duplicate |
 | Idempotency | In-memory or SQLite store | A replayed action produces one logical result; SQLite survives a restart |
+| Conversation memory | `MemorySaver` or SQLite via `DurableMemory` | The default is in-process; the SQLite checkpointer survives a restart and scopes threads to a user |
 | CLI | `argparse` (stdlib) | Zero dependencies; explicit and easy to follow |
 | Logging | `logging` module | Structured output with levels; production standard |
 | Testing | `pytest` + `pytest-cov` | Offline suite with a scripted model; coverage reported by CI, not gated |
@@ -113,9 +114,52 @@ executing and records the completed result afterwards, keyed by
 **What this does not establish.** The per-call timeout stops the guard
 waiting; it does not kill the tool. Python cannot interrupt a thread, so a
 non-cooperative tool may keep running after its result is discarded. Model
-latency and provider spend are outside this layer. `MemorySaver` remains
-in-process only. The guard is an execution policy, not a security sandbox.
-The design and its limits are recorded in [docs/A03.md](docs/A03.md).
+latency and provider spend are outside this layer. The guard is an execution
+policy, not a security sandbox. The design and its limits are recorded in
+[docs/A03.md](docs/A03.md).
+
+---
+
+## Durable Memory
+
+`MemorySaver` forgets a conversation when the process exits. `DurableMemory`
+stores LangGraph checkpoints in a local SQLite file and puts a user boundary
+around every thread.
+
+```python
+from gem_agentic_ai.agent.graph import build_agent
+from gem_agentic_ai.persistence import DurableMemory
+
+memory = DurableMemory("var/agent-memory")          # checkpoints + idempotency
+config = memory.config("alice", "support-1")        # opaque thread id + owner
+agent = build_agent(llm, tools, checkpointer=memory.checkpointer)
+
+agent.invoke({"messages": [("user", "My name is Ada")]}, config)
+# ... process restarts ...
+agent.invoke({"messages": [("user", "What is my name?")]}, config)
+```
+
+| Operation | Behaviour |
+|---|---|
+| `config(user_id, thread_key)` | Resolves a stable, opaque storage id for that pair; registers the thread on first use |
+| Checkpoint read/write | Refused unless the config carries both `user_id` and the registered `thread_id` |
+| `list_threads(user_id)` | Only that user's threads, most recently used first |
+| `delete_thread(user_id, thread_key)` | Removes checkpoints and the registry row; another user's key returns `False` |
+| `sweep_expired()` | Removes threads idle longer than `retention_days` (default 30); opening the store never deletes anything |
+| `guard()` | A `ToolGuard` backed by `SqliteIdempotencyStore` in the same directory |
+
+A restart replays from the last completed checkpoint. Completed tool actions
+are recorded in the idempotency store, so a step replayed after a crash
+produces one logical side effect, not two. Approval decisions are deliberately
+**not** durable: they record a human decision and must be made again in a new
+process.
+
+**What this does not establish.** This is one SQLite file on one host, not a
+distributed store or a lock across machines. Thread ownership is enforced by
+the checkpointer using the caller-supplied `user_id`; an application that lets
+a caller choose that value must authenticate it first. The async checkpointer
+path is not implemented at this version. The design and its limits are
+recorded in [docs/A02.md](docs/A02.md).
 
 ---
 
@@ -188,6 +232,7 @@ src/gem_agentic_ai/
 ├── bounds.py            # ExecutionBudget, ToolLimits, stop reasons
 ├── guard.py             # ToolGuard and GuardedTool (validation, retries, approval)
 ├── idempotency.py       # In-memory and SQLite idempotency stores
+├── persistence.py       # Durable, user-scoped SQLite conversation memory
 ├── config.py            # pydantic-settings configuration
 ├── main.py              # CLI argument parsing and mode dispatch
 ├── tools/
@@ -240,7 +285,7 @@ Detailed design rationale for every major decision is documented in [docs/ARCHIT
 | Feature | Simple ReAct (`simple.py`) | LangGraph (`graph.py`) |
 |---------|---------------------------|----------------------|
 | State management | Manual list of messages | Formal state machine |
-| Persistence | None (stateless) | MemorySaver (in-memory) |
+| Persistence | None (stateless) | MemorySaver (in-memory) or SQLite via `DurableMemory` |
 | Streaming | Blocking (full response) | Event-based streaming |
 | Tool routing | Manual `if/else` | Built-in conditional edges |
 | Execution bounds | Shared `ToolGuard` | Shared `ToolGuard` |

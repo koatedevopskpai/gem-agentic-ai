@@ -11,8 +11,10 @@ WHY LangGraph over a manual loop?
      routing) are explicitly defined, making the agent's control flow
      inspectable and visualisable.
 
-  2. PERSISTENCE — MemorySaver checkpoints conversation state after
-     every step. It is in-process only; durable memory is task A02.
+  2. PERSISTENCE — A checkpointer saves conversation state after every
+     step. MemorySaver is in-process only; pass
+     ``DurableMemory(...).checkpointer`` (persistence.py) to keep state in
+     a local SQLite file across restarts.
 
   3. STREAMING — The agent yields intermediate states, allowing the
      UI to show tool calls as they happen.
@@ -125,7 +127,9 @@ def build_agent(
         system_prompt: Optional system message prepended to every
             conversation.
         checkpointer: Persistence backend for multi-turn memory. Defaults to
-            MemorySaver, which is in-process only; durable memory is A02.
+            MemorySaver, which is in-process only. Pass
+            ``DurableMemory(directory).checkpointer`` for restart-safe,
+            user-scoped storage.
         guard: Optional policy layer shared with another agent. A guard is
             created when omitted, and its allowlist is set from ``tools``.
 
