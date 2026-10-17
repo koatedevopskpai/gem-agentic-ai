@@ -163,6 +163,38 @@ recorded in [docs/A02.md](docs/A02.md).
 
 ---
 
+## Isolated Coding Runner
+
+`coding_task.py` defines one bounded task — implement `slugify(text)` against
+a written contract — with acceptance tests written independently of any
+candidate. `sandbox.py` runs a candidate `solution.py` against those tests in
+a fresh interpreter and a temporary directory:
+
+```python
+from gem_agentic_ai.coding_task import run_submission
+from gem_agentic_ai.sandbox import SandboxLimits
+
+result = run_submission(candidate_source, limits=SandboxLimits(wall_seconds=5))
+print(result.status)   # passed / failed / timeout / killed / error
+print(result.tests)    # one outcome per acceptance test
+```
+
+| Control | Enforcement |
+|---------|-------------|
+| Wall-clock, CPU, memory, process count | Operating system: Windows Job Objects or POSIX rlimits and an RSS watchdog |
+| Writes outside the sandbox, network, child processes | Python audit hook inside the child (cooperative, not a kernel boundary) |
+| Secrets | Child environment rebuilt from an allowlist; secret-looking names dropped |
+| Result integrity | Nonce-tagged report over stdin; a missing or forged report is never "passed" |
+
+**A subprocess timeout alone is not complete isolation.** It stops one process
+and enforces nothing about memory, files, children or the environment. The
+audit-hook controls here can be bypassed by `ctypes` or a native extension;
+the OS limits cannot. Read [docs/K01.md](docs/K01.md) for the threat model,
+the exact limitations, and what is deliberately out of scope (result forgery,
+native code, container-grade isolation).
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -232,6 +264,8 @@ src/gem_agentic_ai/
 ├── bounds.py            # ExecutionBudget, ToolLimits, stop reasons
 ├── guard.py             # ToolGuard and GuardedTool (validation, retries, approval)
 ├── idempotency.py       # In-memory and SQLite idempotency stores
+├── sandbox.py           # Isolated runner: OS limits, audit guards, nonce report
+├── coding_task.py       # The bounded slugify task and its acceptance tests
 ├── persistence.py       # Durable, user-scoped SQLite conversation memory
 ├── config.py            # pydantic-settings configuration
 ├── main.py              # CLI argument parsing and mode dispatch
