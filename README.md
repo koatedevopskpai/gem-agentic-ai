@@ -2,6 +2,9 @@
 
 [![ci](https://github.com/koatedevopskpai/gem-agentic-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/koatedevopskpai/gem-agentic-ai/actions/workflows/ci.yml)
 
+**Evidence:** the reviewer's route through this repository — what is measured,
+where it is proved, and what it does not establish — is [EVIDENCE.md](EVIDENCE.md).
+
 An LLM agent orchestration framework demonstrating two architectural approaches to the ReAct (Reasoning + Acting) pattern:
 
 1. **Simple ReAct Loop** — a manual thought-action-observation loop showing the core pattern from first principles.
