@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -213,29 +213,35 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        agent = build_turn_agent()
+        config = sessions.config(user_id, session_id)
         if session_id in active_turns:
             raise HTTPException(
                 status_code=409, detail="a turn is already running for this session"
             )
         # Claim before returning the response so two POSTs cannot both pass
-        # the check. Runs on one event loop, so check-and-add is atomic.
+        # the check. No await separates the check from the add, so on one
+        # event loop the pair is atomic.
         active_turns.add(session_id)
-        agent = build_turn_agent()
-        config = sessions.config(user_id, session_id)
+
+        def release_claim() -> None:
+            # Called by the worker after the rollback, not when the response
+            # ends: the response can end while cleanup is still running, and
+            # releasing then would let the next turn write the thread this
+            # one is still rolling back.
+            active_turns.discard(session_id)
 
         async def events() -> AsyncIterator[str]:
-            try:
-                async for frame in _stream_frames(
-                    request,
-                    agent,
-                    config,
-                    text,
-                    deadline,
-                    disconnect_poll_seconds,
-                ):
-                    yield frame
-            finally:
-                active_turns.discard(session_id)
+            async for frame in _stream_frames(
+                request,
+                agent,
+                config,
+                text,
+                deadline,
+                disconnect_poll_seconds,
+                on_finish=release_claim,
+            ):
+                yield frame
 
         return StreamingResponse(
             events(), media_type="text/event-stream", headers=dict(_SSE_HEADERS)
@@ -251,16 +257,27 @@ async def _stream_frames(
     text: str,
     deadline: float,
     poll_seconds: float,
+    *,
+    on_finish: Callable[[], None] | None = None,
 ) -> AsyncIterator[str]:
     """Drive one turn, checking for a client disconnect while waiting.
 
     The turn runs on its own event loop (see ``ThreadedTurn``); this
     generator only forwards its events. On a disconnect it asks that turn to
     cancel, which stops the model rather than merely closing the socket.
+    ``on_finish`` is called on the request loop once the worker has finished
+    its cleanup, whether or not the response is still open.
     """
-    turn = ThreadedTurn(agent, config, text, deadline_seconds=deadline).start(
-        asyncio.get_running_loop()
+    turn = ThreadedTurn(
+        agent, config, text, deadline_seconds=deadline, on_finish=on_finish
     )
+    try:
+        turn.start(asyncio.get_running_loop())
+    except Exception:
+        # The worker never ran, so it cannot release; do it here.
+        if on_finish is not None:
+            on_finish()
+        raise
     queue = turn.events
     finished = False
     try:
@@ -289,5 +306,16 @@ async def _stream_frames(
             # follows an error has completed before the response ends. The
             # worker never waits on this await, so an interruption here only
             # makes the client's next read race, not the cleanup.
+            sentinel_seen = False
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await asyncio.wait_for(queue.get(), timeout=5)
+                sentinel_seen = (await asyncio.wait_for(queue.get(), timeout=5)) is None
+            if sentinel_seen and on_finish is not None:
+                # Cleanup is done, so release the session before the response
+                # ends rather than waiting for the worker's own callback:
+                # that callback is queued behind the sentinel but runs only
+                # after ``asyncio.run`` tears its loop down, which can be
+                # several milliseconds later on Windows. Without this, a
+                # client's next turn on the same session would see a 409.
+                on_finish()
+    # A turn that ended without a sentinel (disconnect) is released by the
+    # worker once its rollback finishes; see ``ThreadedTurn._notify_finished``.

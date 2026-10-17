@@ -102,6 +102,66 @@ async def _create_session(client: httpx.AsyncClient, headers: dict = ALICE) -> d
     return response.json()
 
 
+async def _abandon_turn(url: str, sid: str, message: str, *, tokens: int = 2) -> int:
+    """Start a turn, stop reading it, and close the connection.
+
+    A dedicated client is deliberate. A client that stops reading an SSE
+    response must not send its next request on the same connection: the rest
+    of the abandoned body is still in flight and would be read as the next
+    response. That happened while this test was written, and it made the
+    resumed answer the abandoned one. Closing the whole client closes the
+    socket, which is also how the server learns of the disconnect.
+    """
+    received = 0
+    async with httpx.AsyncClient(base_url=url, timeout=10) as abandoned:
+        async with abandoned.stream(
+            "POST",
+            f"/sessions/{sid}/messages",
+            json={"message": message},
+            headers=ALICE,
+        ) as response:
+            async for event in _events(response):
+                if event["event"] == "token":
+                    received += 1
+                if received >= tokens:
+                    break
+    return received
+
+
+async def _open_turn(
+    client: httpx.AsyncClient,
+    sid: str,
+    message: str,
+    *,
+    headers: dict = ALICE,
+    timeout: float = 5.0,
+    **body: object,
+) -> httpx.Response:
+    """POST a turn, retrying while the previous turn is still cleaning up.
+
+    The claim on a session is released by the turn's worker after its
+    rollback, not when the HTTP response ends, so a client that disconnects
+    and immediately resumes can see ``409`` for a few milliseconds. That is
+    the contract: a resumed conversation waits for cleanup instead of racing
+    it. The demo retries in the same way.
+    """
+    deadline = time.time() + timeout
+    while True:
+        request = client.build_request(
+            "POST",
+            f"/sessions/{sid}/messages",
+            json={"message": message, **body},
+            headers=headers,
+        )
+        response = await client.send(request, stream=True)
+        if response.status_code != 409:
+            return response
+        await response.aclose()
+        if time.time() > deadline:
+            raise AssertionError("the session stayed claimed after its turn finished")
+        await asyncio.sleep(0.01)
+
+
 async def _wait_until(predicate, timeout: float = 5.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -200,18 +260,7 @@ def test_a_client_disconnect_cancels_the_run_and_cleans_up(tmp_path: Path) -> No
             async with httpx.AsyncClient(base_url=url, timeout=10) as client:
                 session = await _create_session(client)
                 sid = session["session_id"]
-                received = 0
-                async with client.stream(
-                    "POST",
-                    f"/sessions/{sid}/messages",
-                    json={"message": "abandon me"},
-                    headers=ALICE,
-                ) as response:
-                    async for event in _events(response):
-                        if event["event"] == "token":
-                            received += 1
-                        if received >= 2:
-                            break
+                received = await _abandon_turn(url, sid, "abandon me")
                 cancelled = await _wait_until(lambda: model.cancelled)
                 emitted_at_cancel = model.emitted
                 await asyncio.sleep(0.2)
@@ -219,12 +268,8 @@ def test_a_client_disconnect_cancels_the_run_and_cleans_up(tmp_path: Path) -> No
                 history = (await client.get(f"/sessions/{sid}", headers=ALICE)).json()
 
                 # The session is still usable: a new turn completes.
-                async with client.stream(
-                    "POST",
-                    f"/sessions/{sid}/messages",
-                    json={"message": "try again"},
-                    headers=ALICE,
-                ) as response:
+                opened = await _open_turn(client, sid, "try again")
+                async with contextlib.aclosing(opened) as response:
                     events = await _read_events(response)
             return received, cancelled, emitted_at_cancel, emitted_later, history, events
 
@@ -255,12 +300,8 @@ def test_a_timeout_is_reported_and_the_session_stays_usable(tmp_path: Path) -> N
                 ) as response:
                     first = await _read_events(response)
                 history = (await client.get(f"/sessions/{sid}", headers=ALICE)).json()
-                async with client.stream(
-                    "POST",
-                    f"/sessions/{sid}/messages",
-                    json={"message": "now"},
-                    headers=ALICE,
-                ) as response:
+                opened = await _open_turn(client, sid, "now")
+                async with contextlib.aclosing(opened) as response:
                     second = await _read_events(response)
             return first, history, second
 
@@ -319,25 +360,10 @@ def test_a_resumed_conversation_keeps_its_context(tmp_path: Path) -> None:
                     headers=ALICE,
                 ) as response:
                     first = await _read_events(response)
-                async with client.stream(
-                    "POST",
-                    f"/sessions/{sid}/messages",
-                    json={"message": "lost turn"},
-                    headers=ALICE,
-                ) as response:
-                    count = 0
-                    async for event in _events(response):
-                        if event["event"] == "token":
-                            count += 1
-                        if count >= 2:
-                            break
+                await _abandon_turn(url, sid, "lost turn")
                 await _wait_until(lambda: model.cancelled)
-                async with client.stream(
-                    "POST",
-                    f"/sessions/{sid}/messages",
-                    json={"message": "what is my name?"},
-                    headers=ALICE,
-                ) as response:
+                opened = await _open_turn(client, sid, "what is my name?")
+                async with contextlib.aclosing(opened) as response:
                     third = await _read_events(response)
                 history = (await client.get(f"/sessions/{sid}", headers=ALICE)).json()
             return first, third, history

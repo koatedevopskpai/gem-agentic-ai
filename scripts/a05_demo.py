@@ -163,6 +163,60 @@ async def create_session(client: httpx.AsyncClient) -> str:
     return response.json()["session_id"]
 
 
+async def abandon_turn(url: str, sid: str, message: str, *, tokens: int = 2) -> int:
+    """Stop reading a turn early and close its connection.
+
+    A dedicated client is deliberate: a client that abandons an SSE response
+    must close the connection before it sends anything else. Reusing a
+    connection whose response body was only partly read delivers the rest of
+    that body as the next response — the resume scenario once read the
+    abandoned turn's own tokens as its answer for exactly this reason.
+    """
+    received = 0
+    async with httpx.AsyncClient(base_url=url, timeout=30) as abandoned:
+        async with abandoned.stream(
+            "POST",
+            f"/sessions/{sid}/messages",
+            json={"message": message},
+            headers=ALICE,
+        ) as response:
+            async for event in events(response):
+                if event["event"] == "token":
+                    received += 1
+                if received >= tokens:
+                    break
+    return received
+
+
+async def open_turn(
+    client: httpx.AsyncClient, sid: str, message: str, *, timeout: float = 5.0
+) -> httpx.Response:
+    """POST a turn, retrying while the previous turn finishes cleaning up.
+
+    A session stays claimed until the cancelled worker has completed its
+    rollback, so a client that resumes immediately after a disconnect can see
+    ``409`` for a few milliseconds. Waiting here is what makes the resume
+    scenario deterministic: the next turn cannot race the previous cleanup.
+    """
+    deadline = time.time() + timeout
+    while True:
+        response = await client.send(
+            client.build_request(
+                "POST",
+                f"/sessions/{sid}/messages",
+                json={"message": message},
+                headers=ALICE,
+            ),
+            stream=True,
+        )
+        if response.status_code != 409:
+            return response
+        await response.aclose()
+        if time.time() > deadline:
+            raise AssertionError("the session stayed claimed after its previous turn")
+        await asyncio.sleep(0.01)
+
+
 def _percentile(values: list[float], fraction: float) -> float:
     ordered = sorted(values)
     rank = max(1, math.ceil(fraction * len(ordered)))
@@ -234,23 +288,12 @@ async def scenario_latency(client: httpx.AsyncClient, turns: int) -> dict[str, A
 
 
 async def scenario_disconnect(
-    client: httpx.AsyncClient, model: DemoStreamingModel
+    url: str, client: httpx.AsyncClient, model: DemoStreamingModel
 ) -> dict[str, Any]:
     """Break the connection mid-turn; the model must stop, not just the socket."""
     sid = await create_session(client)
     emitted_before = model.emitted
-    received = 0
-    async with client.stream(
-        "POST",
-        f"/sessions/{sid}/messages",
-        json={"message": "abandon me"},
-        headers=ALICE,
-    ) as response:
-        async for event in events(response):
-            if event["event"] == "token":
-                received += 1
-            if received >= 3:
-                break
+    received = await abandon_turn(url, sid, "abandon me", tokens=3)
 
     cancelled = False
     deadline = time.time() + 5
@@ -264,12 +307,8 @@ async def scenario_disconnect(
     emitted_later = model.emitted
 
     history = (await client.get(f"/sessions/{sid}", headers=ALICE)).json()
-    async with client.stream(
-        "POST",
-        f"/sessions/{sid}/messages",
-        json={"message": "try again"},
-        headers=ALICE,
-    ) as response:
+    opened = await open_turn(client, sid, "try again")
+    async with contextlib.aclosing(opened) as response:
         follow_up = await read_events(response)
     return {
         "tokens_received_before_disconnect": received,
@@ -314,7 +353,9 @@ async def scenario_timeout(client: httpx.AsyncClient, model: DemoStreamingModel)
     }
 
 
-async def scenario_resume(client: httpx.AsyncClient, model: DemoStreamingModel) -> dict[str, Any]:
+async def scenario_resume(
+    url: str, client: httpx.AsyncClient, model: DemoStreamingModel
+) -> dict[str, Any]:
     sid = await create_session(client)
     async with client.stream(
         "POST",
@@ -324,28 +365,13 @@ async def scenario_resume(client: httpx.AsyncClient, model: DemoStreamingModel) 
     ) as response:
         first = await read_events(response)
 
-    received = 0
-    async with client.stream(
-        "POST",
-        f"/sessions/{sid}/messages",
-        json={"message": "this turn will be abandoned"},
-        headers=ALICE,
-    ) as response:
-        async for event in events(response):
-            if event["event"] == "token":
-                received += 1
-            if received >= 2:
-                break
+    await abandon_turn(url, sid, "this turn will be abandoned")
     deadline = time.time() + 5
     while time.time() < deadline and not model.cancelled:
         await asyncio.sleep(0.01)
 
-    async with client.stream(
-        "POST",
-        f"/sessions/{sid}/messages",
-        json={"message": "What is my name?"},
-        headers=ALICE,
-    ) as response:
+    opened = await open_turn(client, sid, "What is my name?")
+    async with contextlib.aclosing(opened) as response:
         third = await read_events(response)
     history = (await client.get(f"/sessions/{sid}", headers=ALICE)).json()
     context = model.contexts[-1]
@@ -429,14 +455,14 @@ async def run(directory: Path, latency_turns: int) -> dict[str, Any]:
             report["base_url"] = url
             async with httpx.AsyncClient(base_url=url, timeout=30) as client:
                 report["latency"] = await scenario_latency(client, latency_turns)
-                report["disconnect"] = await scenario_disconnect(client, model)
+                report["disconnect"] = await scenario_disconnect(url, client, model)
                 # ``cancelled`` latches on the model, so clear it between the
                 # scenarios that read it; each one must prove its own turn
                 # was stopped.
                 model.cancelled = False
                 report["timeout"] = await scenario_timeout(client, model)
                 model.cancelled = False
-                report["resume"] = await scenario_resume(client, model)
+                report["resume"] = await scenario_resume(url, client, model)
                 report["ownership"] = await scenario_ownership(client)
                 report["validation"] = await scenario_validation(client)
     finally:

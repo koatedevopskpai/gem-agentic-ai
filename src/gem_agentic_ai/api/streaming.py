@@ -36,7 +36,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -305,11 +305,13 @@ class ThreadedTurn:
         text: str,
         *,
         deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
+        on_finish: Callable[[], None] | None = None,
     ) -> None:
         self._agent = agent
         self._config = config
         self._text = text
         self._deadline_seconds = deadline_seconds
+        self._on_finish = on_finish
         self._request_loop: asyncio.AbstractEventLoop | None = None
         self._worker_loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[None] | None = None
@@ -352,6 +354,21 @@ class ThreadedTurn:
         with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(queue.put_nowait, item)
 
+    def _notify_finished(self) -> None:
+        """Tell the request loop that cleanup is complete, on its loop.
+
+        Owner after the worker's own sentinel: the HTTP response may have
+        ended long before this, and the session must stay claimed until the
+        rollback has actually finished or the next turn could read and write
+        the thread while this one is still cleaning up.
+        """
+        callback = self._on_finish
+        loop = self._request_loop
+        if callback is None or loop is None or loop.is_closed():
+            return
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(callback)
+
     def _run(self) -> None:
         async def turn() -> None:
             self._task = asyncio.current_task()
@@ -384,6 +401,8 @@ class ThreadedTurn:
                     message="the turn worker failed; see the server log",
                 )
             )
+        finally:
+            self._notify_finished()
 
 
 def encode_sse(event: TurnEvent) -> str:
