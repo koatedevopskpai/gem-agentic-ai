@@ -4,7 +4,8 @@ These are the behaviours A01 requires CI to exercise without credentials:
 
   - a real tool is dispatched and its observation is fed back to the model
   - an unknown tool is reported and not executed
-  - a tool exception becomes an observation instead of crashing the run
+  - a tool exception becomes an observation instead of crashing the run,
+    on both the manual and the LangGraph path
   - turn exhaustion stops the loop with an explicit reason
 
 No network and no model API: the model is scripted, the tools are real.
@@ -17,6 +18,7 @@ from langgraph.errors import GraphRecursionError
 
 from gem_agentic_ai.agent.graph import build_agent
 from gem_agentic_ai.agent.simple import run_simple_agent
+from gem_agentic_ai.bounds import StopReason
 from gem_agentic_ai.tools.system import calculate_multiplication
 from tests.fakes import ScriptedChatModel, tool_call
 
@@ -51,7 +53,8 @@ class TestSimpleLoopExecution:
             {"calculate_multiplication": calculate_multiplication},
         )
 
-        assert result == "The answer is 42."
+        assert result.answer == "The answer is 42."
+        assert result.stop_reason is StopReason.COMPLETED
         # The second model call must include the tool observation.
         observations = _tool_messages(model.seen[1])
         assert len(observations) == 1
@@ -69,10 +72,11 @@ class TestSimpleLoopExecution:
 
         result = run_simple_agent(model, "Do something", {})
 
-        assert result == "I could not use that tool."
+        assert result.answer == "I could not use that tool."
         observations = _tool_messages(model.seen[1])
         assert len(observations) == 1
         assert "unknown tool" in observations[0].content
+        assert observations[0].status == "error"
 
     def test_tool_exception_is_captured_as_observation(self) -> None:
         """A raising tool must not end the run; the error goes back to the model."""
@@ -85,11 +89,13 @@ class TestSimpleLoopExecution:
 
         result = run_simple_agent(model, "Use the tool", {"exploding_tool": exploding_tool})
 
-        assert result == "The tool failed."
+        assert result.answer == "The tool failed."
         observations = _tool_messages(model.seen[1])
         assert len(observations) == 1
         assert "Error during tool execution" in observations[0].content
         assert "deliberate failure: test" in observations[0].content
+        assert observations[0].status == "error"
+        assert result.budget.calls == 1
 
     def test_turn_exhaustion_stops_and_reports(self) -> None:
         """A model that never stops calling tools is cut off after max_turns."""
@@ -106,7 +112,8 @@ class TestSimpleLoopExecution:
         )
 
         assert len(model.seen) == 3
-        assert "allowed number of turns (3)" in result
+        assert result.stop_reason is StopReason.MAX_TURNS
+        assert "allowed number of turns (3)" in result.answer
 
 
 class TestLangGraphExecution:
@@ -158,14 +165,13 @@ class TestLangGraphExecution:
         assert observations[0].status == "error"
         assert result["messages"][-1].content == "I could not use that tool."
 
-    def test_graph_tool_exception_propagates(self) -> None:
-        """Documents current behaviour: the LangGraph path does not recover.
+    def test_graph_tool_exception_becomes_observation(self) -> None:
+        """An unexpected tool exception must not end the graph run.
 
-        The manual loop converts an unexpected tool exception into an
-        observation (tested above). LangGraph's tool node, as constructed by
-        ``create_agent`` in the pinned versions, re-raises instead. Adding
-        recovery there is A03 work; this test pins the difference so a change
-        cannot happen silently.
+        A01 pinned the opposite behaviour: the manual loop recovered while
+        LangGraph re-raised. A03 routes both paths through ``ToolGuard``, so
+        the exception is now an error observation on both. This test replaces
+        the divergence test and pins the shared behaviour.
         """
         model = ScriptedChatModel(
             responses=[
@@ -177,8 +183,15 @@ class TestLangGraphExecution:
         )
         agent = build_agent(model, [exploding_tool])
 
-        with pytest.raises(RuntimeError, match="deliberate failure: graph"):
-            self._invoke(agent, "Use the tool")
+        result = self._invoke(agent, "Use the tool")
+        observations = _tool_messages(result["messages"])
+
+        assert len(observations) == 1
+        assert observations[0].status == "error"
+        assert "Error during tool execution" in observations[0].content
+        assert "deliberate failure: graph" in observations[0].content
+        assert result["messages"][-1].content == "The tool failed."
+        assert len(model.seen) == 2
 
     def test_graph_recursion_limit_stops_a_looping_model(self) -> None:
         """A model that never answers cannot run indefinitely."""
