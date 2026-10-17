@@ -54,6 +54,8 @@ idempotency and explicit approval for consequential actions. See
 | Tool execution | Shared `ToolGuard` | One policy for both agent paths: validate, bound, approve, de-duplicate |
 | Idempotency | In-memory or SQLite store | A replayed action produces one logical result; SQLite survives a restart |
 | Conversation memory | `MemorySaver` or SQLite via `DurableMemory` | The default is in-process; the SQLite checkpointer survives a restart and scopes threads to a user |
+| HTTP transport | SSE over one POST per turn | No client-to-server frames mid-turn; one request keeps ownership and cancellation simple |
+| Turn execution | Dedicated event loop per turn | A disconnect cancels the run; ASGI request-scope re-cancellation cannot interrupt its cleanup |
 | CLI | `argparse` (stdlib) | Zero dependencies; explicit and easy to follow |
 | Logging | `logging` module | Structured output with levels; production standard |
 | Testing | `pytest` + `pytest-cov` | Offline suite with a scripted model; coverage reported by CI, not gated |
@@ -157,9 +159,69 @@ process.
 **What this does not establish.** This is one SQLite file on one host, not a
 distributed store or a lock across machines. Thread ownership is enforced by
 the checkpointer using the caller-supplied `user_id`; an application that lets
-a caller choose that value must authenticate it first. The async checkpointer
-path is not implemented at this version. The design and its limits are
-recorded in [docs/A02.md](docs/A02.md).
+a caller choose that value must authenticate it first. The scoped async
+methods (`aget_tuple`, `alist`, `aput`, `aput_writes`) delegate to the sync
+saver in a worker thread, so the async API works; they do not make SQLite a
+concurrent writer. The design and its limits are recorded in
+[docs/A02.md](docs/A02.md).
+
+---
+
+## Async Streaming API
+
+The agent is also exposed over HTTP: one POST per turn, streamed as
+Server-Sent Events, with sessions owned by an authenticated user.
+
+```bash
+GEM_API_TOKENS="token-alice:alice,token-bob:bob" \
+OPENAI_API_KEY=... \
+python -m gem_agentic_ai.api          # http://127.0.0.1:8000
+```
+
+```bash
+curl -N -H "Authorization: Bearer token-alice" \
+     -H "Content-Type: application/json" \
+     -d '{"message": "What time is it?"}' \
+     http://127.0.0.1:8000/sessions/$SESSION_ID/messages
+```
+
+```
+event: token
+data: {"text": "The "}
+
+event: token
+data: {"text": "time is ..."}
+
+event: done
+data: {"text": "The time is ...", "timing": {"first_token_ms": 73.2, "total_ms": 390.6, "tokens": 6}}
+```
+
+| Property | Behaviour |
+|---|---|
+| Transport | SSE over one POST per turn; `token` frames, then `done` or `error` |
+| Ownership | Sessions are A02 threads; the client gets an opaque id, and another user's id is `404` |
+| Cancellation | A disconnect cancels the run: the model stops, not just the socket |
+| Timeout | Per-turn deadline (default 30 s, 0.05–300 s); the turn is cancelled and reported as `error: timeout` |
+| Cleanup | An interrupted turn's unanswered question is rolled back so the next turn sees clean history |
+| Concurrency | One active turn per session; a second POST is `409` |
+| Modalities | Text only |
+
+**Cancellation is the part that needed engineering.** Cancelling the request
+task closes the connection but, under Starlette/AnyIO, the request's cancel
+scope re-cancels every task in the response on each loop iteration, which
+interrupts LangGraph's shutdown before it can cancel the model node. Each
+turn therefore runs on its own event loop in a worker thread, where it
+receives exactly one cancellation and its cleanup runs to completion. The
+tests assert that the model's stream was cancelled, not merely that the
+connection ended.
+
+**What this does not establish.** The token map is a demo authenticator, not
+OIDC; there is no rate limiting, no tenancy beyond a user id, and no
+multi-replica coordination (`active_turns` is process-local). A timed-out
+tool is not killed. Latency was measured against a scripted model over
+loopback, so it describes the API layer, not a provider. The design, the
+measured figures and the full limits are in [docs/A05.md](docs/A05.md); the
+end-to-end client demo is `scripts/a05_demo.py`.
 
 ---
 
@@ -242,6 +304,12 @@ python -m gem_agentic_ai simple
 
 # Enable verbose logging
 python -m gem_agentic_ai demo --verbose
+
+# Run the HTTP API (requires GEM_API_TOKENS and OPENAI_API_KEY)
+python -m gem_agentic_ai.api
+
+# Offline end-to-end demo of the API: latency, disconnect, timeout, resume
+python scripts/a05_demo.py --out artifacts/a05_demo.json
 ```
 
 ### Example Queries
@@ -269,6 +337,12 @@ src/gem_agentic_ai/
 ├── persistence.py       # Durable, user-scoped SQLite conversation memory
 ├── config.py            # pydantic-settings configuration
 ├── main.py              # CLI argument parsing and mode dispatch
+├── api/
+│   ├── __main__.py      # python -m gem_agentic_ai.api (environment configuration)
+│   ├── server.py        # FastAPI app: sessions, SSE turn endpoint, auth dependency
+│   ├── streaming.py     # stream_turn, ThreadedTurn, deadlines, rollback, SSE
+│   ├── auth.py          # Bearer token → authenticated user id
+│   └── sessions.py      # User-scoped session service over DurableMemory
 ├── tools/
 │   ├── __init__.py      # Tool registry / re-exports
 │   ├── system.py        # Standard-library tools (clock, calculator)

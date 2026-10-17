@@ -33,11 +33,12 @@ OWNERSHIP
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -146,6 +147,23 @@ class _ThreadRegistry:
                 (storage_id, user_id),
             ).fetchone()
         return row is not None
+
+    def find_by_storage(self, user_id: str, storage_id: str) -> ThreadRecord | None:
+        """Look up a thread by its opaque storage id, scoped to one user.
+
+        The API hands the storage id to the client as a session handle, so it
+        needs to resolve one back to the owning thread. The user id is part of
+        the query: another user's id yields no row, which the caller turns
+        into "not found" rather than "forbidden" so the response does not
+        confirm that the session exists.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT user_id, thread_key, storage_id, created_at, last_used_at "
+                "FROM thread_registry WHERE storage_id = ? AND user_id = ?",
+                (storage_id, user_id),
+            ).fetchone()
+        return None if row is None else ThreadRecord(*row)
 
     def touch(self, storage_id: str, now: float) -> None:
         with self._lock:
@@ -266,6 +284,59 @@ class _ScopedCheckpointer(BaseCheckpointSaver):
         self._authorise(config, touch=True)
         self._saver.put_writes(config, writes, task_id, task_path)
 
+    # The underlying SqliteSaver is synchronous: ``langgraph-checkpoint-sqlite``
+    # ships an async saver only as ``AsyncSqliteSaver``, which needs a second
+    # connection and its own driver. Instead of maintaining two stores, the
+    # async methods run the sync calls in a worker thread. The event loop is
+    # never blocked on disk, and there is still exactly one SQLite writer.
+    # LangGraph's async path requires these methods; without them the agent
+    # cannot run under the API at all.
+
+    async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        self._authorise(config)
+        return await asyncio.to_thread(self._saver.get_tuple, config)
+
+    async def alist(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> AsyncIterator[CheckpointTuple]:
+        self._authorise(config)
+        items = await asyncio.to_thread(
+            lambda: list(
+                self._saver.list(config, filter=filter, before=before, limit=limit)
+            )
+        )
+        for item in items:
+            yield item
+
+    async def aput(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: Any,
+    ) -> RunnableConfig:
+        self._authorise(config, touch=True)
+        return await asyncio.to_thread(
+            self._saver.put, config, checkpoint, metadata, new_versions
+        )
+
+    async def aput_writes(
+        self,
+        config: RunnableConfig,
+        writes: list[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        self._authorise(config, touch=True)
+        await asyncio.to_thread(
+            self._saver.put_writes, config, writes, task_id, task_path
+        )
+
     def delete_thread(self, thread_id: str) -> None:
         raise ThreadAccessError(
             "delete threads through DurableMemory.delete_thread(user_id, thread_key)"
@@ -322,18 +393,56 @@ class DurableMemory:
         """The user-scoped checkpointer to pass to ``build_agent``."""
         return self._checkpointer
 
+    def create_thread(self, user_id: str, thread_key: str) -> ThreadRecord:
+        """Register (or find) a thread and return its record.
+
+        The same ``(user_id, thread_key)`` pair resolves to the same opaque
+        storage id across restarts. An API that creates sessions by label
+        uses this to obtain the storage id it hands to the client.
+        """
+        user_id, thread_key = _require_scope(user_id, thread_key)
+        return self._registry.get_or_create(user_id, thread_key, self._clock())
+
     def config(self, user_id: str, thread_key: str) -> dict[str, Any]:
         """Return a LangGraph config for one user's thread.
 
         The same ``(user_id, thread_key)`` pair resolves to the same opaque
         storage id across restarts.
         """
-        user_id, thread_key = _require_scope(user_id, thread_key)
-        record = self._registry.get_or_create(user_id, thread_key, self._clock())
+        record = self.create_thread(user_id, thread_key)
         return {
             "configurable": {
                 "thread_id": record.storage_id,
-                "user_id": user_id,
+                "user_id": record.user_id,
+            }
+        }
+
+    def find_session(self, user_id: str, session_id: str) -> ThreadRecord | None:
+        """Resolve a storage id (an API session handle) for one user.
+
+        Returns ``None`` when the id does not exist *or* belongs to a
+        different user. Callers should render both cases identically.
+        """
+        user_id, _ = _require_scope(user_id, "_")
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        return self._registry.find_by_storage(user_id, session_id)
+
+    def config_for_session(self, user_id: str, session_id: str) -> dict[str, Any]:
+        """Return the LangGraph config for a session the user owns.
+
+        Raises:
+            ThreadAccessError: when the session is unknown to ``user_id``.
+        """
+        record = self.find_session(user_id, session_id)
+        if record is None:
+            raise ThreadAccessError(
+                f"session '{session_id}' is not owned by user '{user_id}'"
+            )
+        return {
+            "configurable": {
+                "thread_id": record.storage_id,
+                "user_id": record.user_id,
             }
         }
 

@@ -8,3 +8,5 @@ langgraph-checkpoint-sqlite==3.1.2
 duckduckgo_search==8.1.1
 pydantic-settings==2.14.1
 pydantic==2.13.4
+fastapi==0.143.3
+uvicorn==0.54.0
