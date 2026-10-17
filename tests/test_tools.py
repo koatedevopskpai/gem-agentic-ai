@@ -143,22 +143,21 @@ class TestQueryEmployeeDatabase:
 
 
 class TestWebSearch:
-    """Web search tests — smoke test for structure, integration test for network.
+    """Web search tests — structure offline, one live call behind a marker.
 
-    The tool is tested structurally here (name, args, return type).
-    A full integration test (marked) hits DuckDuckGo's live API
-    and is excluded from the default pytest run.
+    ``web_search`` returns an error string when the network or the
+    DuckDuckGo library is unavailable, so an unmarked call would pass
+    offline while proving nothing. Every network call here is marked
+    ``integration`` and excluded from the default pytest run.
+
+    The formatting and error paths are covered without the network in
+    ``test_tools_web.py``.
     """
 
     def test_tool_metadata(self) -> None:
         """Verify the tool has the expected LangChain interface."""
         assert web_search.name == "web_search"
         assert "query" in web_search.args
-
-    def test_returns_string(self) -> None:
-        """Smoke test: web_search should return a string."""
-        result = web_search.invoke({"query": "hello", "max_results": 1})
-        assert isinstance(result, str)
 
     @pytest.mark.integration
     def test_live_search(self) -> None:

@@ -165,9 +165,9 @@ This document captures the key architectural decisions made during the design of
 - `monkeypatch` fixtures enable per-test environment variable control without cross-test contamination.
 - Mocking the LLM (`MagicMock`) allows testing agent loop logic (tool calls, error handling, turn limits) without API calls.
 - `sys.modules` manipulation enables testing lazy import error paths.
-- `conftest.py` with `autouse=True` fixture ensures `OPENAI_API_KEY` is always set during tests.
-- Coverage target of 80%+ ensures the test suite is comprehensive.
-- Integration test marker (`@pytest.mark.integration`) separates fast unit tests from network-dependent tests.
+- `conftest.py` sets a placeholder `OPENAI_API_KEY` at import time. This must happen before collection: `config.py` instantiates `Settings()` at import, and a fixture would run too late on a clean checkout with no `.env`. The autouse fixture then pins the value per test.
+- Coverage is reported, not asserted. No coverage threshold is enforced, so a high percentage is not evidence that the suite is comprehensive.
+- Integration test marker (`@pytest.mark.integration`) separates fast unit tests from network-dependent tests. The default run is `-m "not integration"`.
 
 ---
 
