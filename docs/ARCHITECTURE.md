@@ -222,11 +222,11 @@ This document captures the key architectural decisions made during the design of
 - **One policy:** Validation, retries, idempotency and approval cannot drift between implementations if there is only one implementation.
 - **Fail closed:** A tool with no schema, an invalid argument, an unapproved consequential action, or an exhausted budget is refused. It is not executed and then reported.
 - **Observable:** `AgentRunResult.budget` and `BoundedAgent.budget` expose the stop reason and per-call records. A later model answer cannot erase an earlier refusal.
-- **Recovery:** An unexpected exception becomes an error observation on both paths, so the model can choose another approach.
+- **Recovery at a documented boundary:** `GuardedTool` converts an unexpected exception into an error `ToolMessage` before the native tool node sees it, so the model can choose another approach. LangGraph's own exception behaviour is unchanged; it is bypassed by the wrapper, not modified. A graph built without the wrapper keeps the native behaviour.
 
 **Rejected alternatives:**
 - **LangChain `ToolCallLimitMiddleware` / `ToolRetryMiddleware`:** They cover the graph path only. The manual loop would keep a second policy, which is how the A01 divergence arose. They also do not provide schema refusal, approval, or idempotency.
-- **Catch the exception in the graph and document the divergence:** Rejected. A03 claims bounded execution and a shared failure behaviour; documenting an unexplained difference would leave the claim false on one path.
+- **Catch the exception in the graph and stop there:** Rejected. That would leave the manual loop with a different validation, retry and approval policy, and would couple the fix to the native tool node instead of putting one wrapper around it.
 - **Per-tool try/except in each tool:** Scatters policy across every tool and makes "is this call allowed?" unanswerable in one place.
 
 **Trade-offs and boundaries:**
