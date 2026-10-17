@@ -1,0 +1,56 @@
+name: ci
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-tests:
+    name: offline tests (py3.11, no credentials)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # Pinned set from requirements.txt. `pip install -e ".[dev]"` also works
+      # but resolves the newest versions matching pyproject ranges.
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install --no-deps -e .
+
+      - name: Lint
+        run: ruff check .
+
+      # The default suite makes no network or model calls. Tests that do are
+      # marked `integration` and are deliberately not run here. No secrets are
+      # available to this job.
+      - name: Offline test suite
+        run: pytest -m "not integration"
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo "### Offline checks"
+            echo ""
+            echo "- Runner: \`ubuntu-latest\`, Python 3.11"
+            echo "- Command: \`pytest -m \"not integration\"\`"
+            echo "- Credentials: none. Live model and network checks were not run."
+            echo ""
+            echo '```'
+            coverage report || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

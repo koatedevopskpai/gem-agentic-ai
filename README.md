@@ -1,5 +1,7 @@
 # Gem Agentic AI
 
+[![ci](https://github.com/koatedevopskpai/gem-agentic-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/koatedevopskpai/gem-agentic-ai/actions/workflows/ci.yml)
+
 A production-grade LLM agent orchestration framework demonstrating two architectural approaches to the ReAct (Reasoning + Acting) pattern:
 
 1. **Simple ReAct Loop** — a manual thought-action-observation loop (~50 lines) showing the core pattern from first principles.
@@ -46,7 +48,7 @@ Both implementations consume the same shared tool library, illustrating dependen
 | Agent orchestration | LangGraph `create_agent` | Formal state machine with persistence and streaming |
 | CLI | `argparse` (stdlib) | Zero dependencies; explicit and easy to follow |
 | Logging | `logging` module | Structured output with levels; production standard |
-| Testing | `pytest` + `pytest-cov` | 90% coverage with mocked externals |
+| Testing | `pytest` + `pytest-cov` | Offline suite with a scripted model; coverage reported by CI, not gated |
 
 ---
 
