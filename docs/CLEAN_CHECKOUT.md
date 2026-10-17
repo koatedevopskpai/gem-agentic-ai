@@ -60,6 +60,9 @@ python -m pytest -m "not integration"
 - The LLM is scripted or mocked in every agent test. Tool calls in the
   simple ReAct loop are dispatched to real tool objects in the tests that
   were added under A01.
+- CI (`.github/workflows/ci.yml`) runs this exact command on every push and
+  pull request, with no secrets configured. Integration-marked tests are not
+  run there.
 
 ## Optional checks (not part of the default run)
 
