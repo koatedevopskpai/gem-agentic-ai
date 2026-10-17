@@ -58,8 +58,13 @@ Design records: [ADR-11](docs/ARCHITECTURE.md) (one shared guard),
 
 | Platform | Result | Coverage |
 |---|---|---|
-| Linux (`python:3.11-slim`, Python 3.11.17) | **177 passed, 1 deselected in 13.73 s** | TOTAL 1052 statements, 70 missed, **93%** |
-| Windows 11 (Python 3.11.9) | **177 passed, 1 deselected in 17.84 s** | TOTAL 1052 statements, 78 missed, **93%** |
+| Linux (`python:3.11-slim`, Python 3.11.17) | **266 passed, 1 deselected** | **89%** |
+| Windows 11 (Python 3.11.9) | **266 passed, 1 deselected** | 89% |
+
+The suite grew with A05 (async streaming API) and A06 (MCP tool server), so the
+count moved from **177 passed at 93%** — recorded when this pack was written — to
+**266 passed at 89%**. Coverage falls as new code lands; both figures are
+reported, and neither is gated. The Linux run remains the authoritative one.
 
 Per module on Linux: `persistence.py` 100%, `bounds.py` 98%, `guard.py` 93%,
 `sandbox.py` 90%. On Windows `sandbox.py` is 85% because the POSIX-only
