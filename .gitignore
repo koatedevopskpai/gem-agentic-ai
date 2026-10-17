@@ -21,3 +21,5 @@ build/
 
 # Ruff cache
 .ruff_cache/
+# Local demo workdir (SQLite stores, reports)
+var/

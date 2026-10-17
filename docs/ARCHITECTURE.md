@@ -338,6 +338,83 @@ independent acceptance tests that define success.
 - The interpreter runs with `-I -S -B`: stdlib only, no site-packages, no
   bytecode writes.
 
+## ADR-14: Streaming HTTP API with a Dedicated Loop per Turn
+
+**Status:** Accepted
+
+**Context:** The agent was usable only in-process. An API adds three
+requirements the CLI never exercised: token streaming, cancellation that
+stops work, and sessions bound to an authenticated user. The obvious
+implementation — stream the graph inside the request coroutine and cancel
+that task on disconnect — failed in a way that looked correct from the
+outside: the socket closed and the unanswered question was rolled back, but
+the model kept producing tokens. The cause is in the ASGI server, not in
+LangGraph: Starlette runs a response inside an AnyIO cancel scope that,
+once cancelled by a disconnect, re-cancels every task in the request tree on
+each event-loop iteration. LangGraph's shutdown awaits are interrupted again
+as soon as they resume, so the node tasks running the model are never
+cancelled.
+
+**Decision:** `api/server.py` exposes one POST per turn as Server-Sent
+Events; `api/streaming.py` implements the turn. The turn runs on a fresh
+event loop in a worker thread (`ThreadedTurn`). The request coroutine only
+forwards events, bridged with `loop.call_soon_threadsafe`, and asks the
+worker to cancel when it sees a disconnect or a terminal event. Inside the
+worker, `stream_turn` consumes `agent.astream` in an internal task so
+`CancelledError` is raised where the graph is iterated; it closes the stream
+explicitly and rolls back the unanswered `HumanMessage` after the run has
+stopped. A `None` sentinel is published only when all of that has finished.
+
+Sessions are A02 durable threads: the client receives an opaque storage id,
+every lookup is scoped by the authenticated user, and another user's id is
+`404`. A second concurrent turn on one session is `409`. `_ScopedCheckpointer`
+gained async methods that delegate to the sync SQLite saver with
+`asyncio.to_thread`, because `SqliteSaver` has no async implementation at
+this version.
+
+**Rationale:**
+- **Cancellation must reach the work.** A closed response is observability,
+  not control. The test double records that its stream was cancelled, and
+  the demo records that the token count is frozen after the client leaves.
+- **The turn owns its cancellation.** On its own loop it receives exactly
+  one `CancelledError`, from an explicit `task.cancel()`, and its cleanup
+  cannot be interrupted by the HTTP layer.
+- **One loop per turn, not one thread per token.** The worker is idle
+  between chunks; the cost is one thread per active turn, and concurrent
+  turns do not serialise.
+- **Ownership at the storage layer.** Reusing A02 means a mistaken API check
+  cannot expose a conversation: the checkpointer refuses a config outside
+  the registered owner.
+- **Fail closed on configuration.** An empty token map refuses
+  construction; there is no anonymous mode.
+
+**Rejected alternatives:**
+- **Cancel the response task in place.** Measured to close the socket while
+  the model continued; the AnyIO re-cancellation breaks LangGraph's
+  shutdown.
+- **WebSockets.** No client-to-server frames are needed mid-turn, and SSE
+  keeps one request per turn, which makes ownership and the 409 rule
+  straightforward.
+- **Polling with a server-side buffer.** Adds latency and a second lifetime
+  to manage.
+- **A process per turn.** Stronger isolation, much larger operational cost;
+  the loop-per-turn keeps one process and one store.
+- **JWT/OIDC now.** The static token map is enough to prove that an
+  authenticated user id reaches the session layer. The authenticator is the
+  seam where a real verifier goes; it is not implemented here.
+
+**Trade-offs and boundaries:**
+- Text only.
+- Static tokens in the environment; no rotation, revocation, rate limiting
+  or tenancy beyond a user id.
+- `active_turns` is process-local: two replicas could interleave turns for
+  one session. One process is the supported deployment.
+- The deadline stops the turn, not a tool already running in a thread.
+- Latency figures measured with a scripted model over loopback describe the
+  API layer, not a provider or a wide-area network.
+- A slow client lets the queue between worker and response grow; there is no
+  backpressure policy yet.
+
 ---
 
 ## Component Dependency Graph
@@ -365,6 +442,14 @@ persistence.py
   ├── bounds.py                    (ToolLimits for guard())
   ├── guard.py                     (ToolGuard)
   └── idempotency.py               (SqliteIdempotencyStore)
+
+api/__main__.py
+  └── api/server.py
+      ├── api/auth.py              (bearer token → user id)
+      ├── api/sessions.py          (user-scoped session service)
+      │   └── persistence.py       (DurableMemory, ThreadRecord)
+      ├── api/streaming.py         (stream_turn, ThreadedTurn, SSE)
+      └── agent/graph.py           (BoundedAgent per turn)
 ```
 
 Key property: **arrows point in the direction of dependency.** Tools never import agents. Agents never import specific tools. Configuration is imported by everything but imports nothing (except pydantic-settings).
