@@ -1,7 +1,7 @@
 """
 LANGGRAPH AGENT ORCHESTRATOR
 ============================
-A production-grade agent built on LangGraph's state machine.
+A LangGraph agent built on the framework's state machine.
 
 WHY LangGraph over a manual loop?
   The simple ReAct loop (simple.py) works fine for single-turn demos.
@@ -12,16 +12,24 @@ WHY LangGraph over a manual loop?
      inspectable and visualisable.
 
   2. PERSISTENCE — MemorySaver checkpoints conversation state after
-     every step. Multi-turn chat survives server restarts (if a
-     database-backed checkpointer is used).
+     every step. It is in-process only; durable memory is task A02.
 
   3. STREAMING — The agent yields intermediate states, allowing the
-     UI to show tool calls as they happen (typewriter effect, tool
-     status updates).
+     UI to show tool calls as they happen.
 
-  4. EXTENSIBILITY — Human-in-the-loop, sub-graphs, parallel tool
-     execution, and branching conversations are all configuration
-     changes rather than rewrites.
+  4. EXTENSIBILITY — Sub-graphs, parallel tool execution and branching
+     are configuration changes rather than rewrites.
+
+BOUNDED EXECUTION
+  ``create_agent``'s tool node re-raises an unexpected tool exception and
+  ends the run. Rather than patching that one path, ``build_agent`` wraps
+  every tool in a ``GuardedTool``. The guard validates arguments, enforces
+  timeouts and budgets, applies idempotency and approval, and returns a
+  finished ``ToolMessage``. Both agent implementations therefore share one
+  policy and one failure behaviour.
+
+  The graph's own ``recursion_limit`` still bounds model steps that make no
+  tool calls at all. It is a separate, complementary bound.
 
 STATE MACHINE FLOW
   ┌──────────┐     ┌───────────┐     ┌───────────┐
@@ -42,6 +50,7 @@ USAGE
 """
 
 import logging
+from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -49,9 +58,56 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Checkpointer
 
+from gem_agentic_ai.bounds import BudgetSnapshot
+from gem_agentic_ai.guard import GuardedTool, ToolGuard
 from gem_agentic_ai.models.state import AgentState
 
 logger = logging.getLogger(__name__)
+
+
+class BoundedAgent:
+    """The compiled graph plus the guard that bounds its tool calls.
+
+    The guard is reset at the start of every ``invoke`` / ``stream`` call, so
+    one chat turn cannot exhaust the next turn's budget. Idempotency records
+    and approval decisions live outside the budget and survive the reset.
+
+    Any attribute not defined here is delegated to the compiled graph, so
+    ``get_state``, ``update_state`` and the rest of the LangGraph API remain
+    available.
+    """
+
+    def __init__(self, graph: Any, guard: ToolGuard) -> None:
+        self._graph = graph
+        self.guard = guard
+
+    @property
+    def name(self) -> str:
+        return self._graph.name
+
+    @property
+    def budget(self) -> BudgetSnapshot:
+        return self.guard.budget.snapshot()
+
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        self.guard.reset()
+        return self._graph.invoke(input, config, **kwargs)
+
+    def stream(self, input: Any, config: Any = None, **kwargs: Any):
+        self.guard.reset()
+        yield from self._graph.stream(input, config, **kwargs)
+
+    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        self.guard.reset()
+        return await self._graph.ainvoke(input, config, **kwargs)
+
+    async def astream(self, input: Any, config: Any = None, **kwargs: Any):
+        self.guard.reset()
+        async for event in self._graph.astream(input, config, **kwargs):
+            yield event
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._graph, item)
 
 
 def build_agent(
@@ -59,29 +115,22 @@ def build_agent(
     tools: list[BaseTool],
     system_prompt: str | None = None,
     checkpointer: Checkpointer | None = None,
-) -> object:
-    """Construct and compile a LangGraph agent.
-
-    Under the hood, create_agent builds a StateGraph with two nodes:
-      1. An LLM-calling node that decides whether to answer or use a tool.
-      2. A tool-execution node that runs the requested tool.
-
-    A conditional edge routes from the tool node back to the LLM node
-    (if more tools are needed) or to the END node (if the LLM produced
-    a final answer).
+    guard: ToolGuard | None = None,
+) -> BoundedAgent:
+    """Construct a LangGraph agent whose tool calls are bounded.
 
     Args:
         llm: A LangChain chat model instance (e.g., ChatOpenAI).
-        tools: The list of tools the agent may call during reasoning.
+        tools: The tools the agent may call. This list is also the allowlist.
         system_prompt: Optional system message prepended to every
-                       conversation. Use this to set the agent's persona
-                       or behavioural constraints.
-        checkpointer: Persistence backend for multi-turn memory.
-                      Defaults to MemorySaver (in-memory).
-                      Swap for PostgresSaver, SqliteSaver, etc.
+            conversation.
+        checkpointer: Persistence backend for multi-turn memory. Defaults to
+            MemorySaver, which is in-process only; durable memory is A02.
+        guard: Optional policy layer shared with another agent. A guard is
+            created when omitted, and its allowlist is set from ``tools``.
 
     Returns:
-        A CompiledStateGraph ready for .invoke() or .stream() calls.
+        A ``BoundedAgent``: the compiled graph plus its guard and budget.
 
     Example:
         >>> from langchain_openai import ChatOpenAI
@@ -92,18 +141,25 @@ def build_agent(
         ...     {"messages": [("user", "What time is it?")]},
         ...     {"configurable": {"thread_id": "demo-1"}},
         ... )
+        >>> agent.budget.stop_reason  # None when nothing was cut short
     """
+    guard = guard or ToolGuard()
+    guard.restrict_to(tool.name for tool in tools)
+
+    guarded: list[BaseTool] = [
+        tool if isinstance(tool, GuardedTool) else guard.wrap(tool) for tool in tools
+    ]
     checkpointer = checkpointer or MemorySaver()
     logger.info(
         "Building LangGraph agent: model=%s, tools=%d, checkpointer=%s",
         getattr(llm, "model_name", type(llm).__name__),
-        len(tools),
+        len(guarded),
         type(checkpointer).__name__,
     )
 
     agent = create_agent(
         model=llm,
-        tools=tools,
+        tools=guarded,
         system_prompt=system_prompt,
         checkpointer=checkpointer,
         state_schema=AgentState,
@@ -111,4 +167,4 @@ def build_agent(
     )
 
     logger.debug("Agent graph compiled successfully.")
-    return agent
+    return BoundedAgent(agent, guard)

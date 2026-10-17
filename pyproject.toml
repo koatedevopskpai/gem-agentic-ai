@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gem-agentic-ai"
 version = "0.1.0"
-description = "A production-grade agentic AI framework demonstrating LangGraph state machines, multi-tool orchestration, and multi-turn conversation."
+description = "An agentic AI framework demonstrating LangGraph state machines, bounded tool execution, multi-tool orchestration, and multi-turn conversation."
 requires-python = ">=3.11"
 dependencies = [
     "python-dotenv>=1.0",

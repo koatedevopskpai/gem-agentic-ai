@@ -8,8 +8,26 @@ are not covered by the unit tests for individual helper functions.
 import logging
 from unittest.mock import MagicMock, patch
 
+from gem_agentic_ai.bounds import AgentRunResult, BudgetSnapshot, StopReason
 from gem_agentic_ai.config import settings
 from gem_agentic_ai.main import _configure_logging, main
+
+
+def _run_result(answer: str) -> AgentRunResult:
+    """Build the value run_simple_agent returns, without running the model."""
+    return AgentRunResult(
+        answer=answer,
+        stop_reason=StopReason.COMPLETED,
+        budget=BudgetSnapshot(
+            stop_reason=None,
+            calls=0,
+            per_tool={},
+            observation_tokens=0,
+            elapsed_seconds=0.0,
+            cancelled=False,
+            records=(),
+        ),
+    )
 
 
 class TestConfigureLogging:
@@ -89,7 +107,7 @@ class TestModeFunctions:
 
         with patch("builtins.input", return_value="test query"):
             with patch("gem_agentic_ai.main.run_simple_agent") as mock_run:
-                mock_run.return_value = "Mocked answer"
+                mock_run.return_value = _run_result("Mocked answer")
 
                 run_simple_demo()  # should not raise
                 mock_run.assert_called_once()

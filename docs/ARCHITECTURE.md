@@ -71,22 +71,22 @@ This document captures the key architectural decisions made during the design of
 
 **Status:** Accepted
 
-**Context:** The primary agent implementation needs to be production-grade — supporting multi-turn conversation, streaming, and future extensibility (human-in-the-loop, branching).
+**Context:** The primary agent implementation needs multi-turn conversation, streaming, inspectable control flow, and room to extend the graph (sub-graphs, branching).
 
 **Decision:** Use LangGraph's `create_agent` factory with `MemorySaver` checkpointer.
 
 **Rationale:**
 - **Formal state machine:** Nodes and edges are explicitly defined, making control flow inspectable and visualisable.
-- **Persistence:** `MemorySaver` checkpoints state after every step. Multi-turn chat survives if a database-backed checkpointer is swapped in.
+- **Persistence:** `MemorySaver` checkpoints state after every step. It is in-process only; multi-turn chat survives a restart only once a durable checkpointer is supplied.
 - **Streaming:** Agents yield intermediate states, enabling real-time UI updates (tool call progress, typewriter text).
-- **Extensibility:** Human-in-the-loop, sub-graphs, parallel tool execution, and branching are configuration changes, not rewrites.
-- **Industry standard:** LangGraph is the leading framework for production LLM agents.
+- **Extensibility:** Sub-graphs, parallel tool execution, and branching are configuration changes, not rewrites.
+- **Widely adopted:** LangGraph is a commonly used framework for stateful LLM agents.
 
 **Trade-offs:**
 - Additional dependency (`langgraph`).
 - More abstraction than a simple loop — harder to debug at the lowest level.
 
-**Note:** A manual ReAct loop (`agent/simple.py`) is maintained alongside the LangGraph version as a pedagogical tool, showing exactly what LangGraph does under the hood.
+**Note:** A manual ReAct loop (`agent/simple.py`) is maintained alongside the LangGraph version as a pedagogical tool, showing exactly what LangGraph does under the hood. It shares the tool library and the execution guard with the graph path (ADR-11).
 
 ---
 
@@ -163,7 +163,8 @@ This document captures the key architectural decisions made during the design of
 **Rationale:**
 - Industry standard testing framework.
 - `monkeypatch` fixtures enable per-test environment variable control without cross-test contamination.
-- Mocking the LLM (`MagicMock`) allows testing agent loop logic (tool calls, error handling, turn limits) without API calls.
+- A scripted chat model (`tests/fakes.py`) allows testing agent loop logic (tool calls, error handling, turn limits) without API calls. Unlike a bare `MagicMock`, it exercises the real message and tool-call shapes.
+- `MagicMock` is still used where the test only needs a collaborator that records calls (for example the CLI mode functions).
 - `sys.modules` manipulation enables testing lazy import error paths.
 - `conftest.py` sets a placeholder `OPENAI_API_KEY` at import time. This must happen before collection: `config.py` instantiates `Settings()` at import, and a fixture would run too late on a clean checkout with no `.env`. The autouse fixture then pins the value per test.
 - Coverage is reported, not asserted. No coverage threshold is enforced, so a high percentage is not evidence that the suite is comprehensive.
@@ -180,10 +181,10 @@ This document captures the key architectural decisions made during the design of
 **Decision:** Keep and maintain both `agent/simple.py` (manual ReAct loop) and `agent/graph.py` (LangGraph state machine).
 
 **Rationale:**
-- The simple loop (~50 lines) shows exactly what a ReAct agent does: LLM thinks → acts (calls tools) → observes (reads results) → repeats.
+- The simple loop shows exactly what a ReAct agent does: LLM thinks → acts (calls tools) → observes (reads results) → repeats.
 - The LangGraph version shows how the same pattern is formalised with a state machine, persistence, and streaming.
-- Both share the same tool library — demonstrating dependency inversion and code reuse.
-- Portfolio reviewers can trace the evolution from basic pattern to production architecture.
+- Both share the same tool library and the same `ToolGuard` — demonstrating dependency inversion and, after A03, one execution policy rather than two.
+- Portfolio reviewers can trace the evolution from the manual pattern to a framework-based architecture.
 - The simple loop is also useful as a debugging tool — if something goes wrong in LangGraph, strip it back to the manual loop and isolate the issue.
 
 ---
@@ -194,13 +195,46 @@ This document captures the key architectural decisions made during the design of
 
 **Context:** Both agent implementations need access to tools, but should not know about specific tool implementations.
 
-**Decision:** Agents receive tools as parameters (either as `list[BaseTool]` for LangGraph or `dict[str, object]` for the simple loop). Neither agent imports any concrete tool.
+**Decision:** Agents receive tools as parameters (either as `list[BaseTool]` for LangGraph or `Mapping[str, BaseTool]` for the simple loop). Neither agent imports any concrete tool. The registry is also the tool allowlist: a name outside it is refused before execution.
 
 **Rationale:**
 - **Testability:** Agents can be tested with mock tools without importing real tools.
 - **Swapability:** Adding, removing, or replacing tools requires no changes to agent code.
 - **Separation of concerns:** Tools module = "what the agent can do"; agent module = "how the agent decides what to do".
 - Follows the dependency inversion principle (D from SOLID).
+
+---
+
+## ADR-11: One Shared Guard for Bounded Tool Execution
+
+**Status:** Accepted
+
+**Context:** A01 pinned a real divergence: an unexpected tool exception became an observation in the manual loop but ended the LangGraph run. Neither path validated arguments against a schema, bounded a slow tool, capped the number of calls, protected a side effect, or exposed why a run stopped. A claim of bounded execution cannot coexist with two different failure behaviours.
+
+**Decision:** Put every tool call on both paths through `ToolGuard`, backed by `ExecutionBudget`:
+
+- `ToolGuard.execute()` validates the call (allowlist, mapping, size, Pydantic schema), reserves budget, checks the idempotency store, enforces approval for consequential tools, and only then runs the tool with a timeout and retry policy.
+- The manual loop calls `guard.execute()` directly and turns the `ToolOutcome` into a `ToolMessage`.
+- `build_agent()` wraps each tool in `GuardedTool`; the LangGraph tool node receives a finished `ToolMessage`, including `status="error"`, and passes it through unchanged.
+- `ExecutionBudget` records the first stop reason and an audit trail of every call.
+
+**Rationale:**
+- **One policy:** Validation, retries, idempotency and approval cannot drift between implementations if there is only one implementation.
+- **Fail closed:** A tool with no schema, an invalid argument, an unapproved consequential action, or an exhausted budget is refused. It is not executed and then reported.
+- **Observable:** `AgentRunResult.budget` and `BoundedAgent.budget` expose the stop reason and per-call records. A later model answer cannot erase an earlier refusal.
+- **Recovery at a documented boundary:** `GuardedTool` converts an unexpected exception into an error `ToolMessage` before the native tool node sees it, so the model can choose another approach. LangGraph's own exception behaviour is unchanged; it is bypassed by the wrapper, not modified. A graph built without the wrapper keeps the native behaviour.
+
+**Rejected alternatives:**
+- **LangChain `ToolCallLimitMiddleware` / `ToolRetryMiddleware`:** They cover the graph path only. The manual loop would keep a second policy, which is how the A01 divergence arose. They also do not provide schema refusal, approval, or idempotency.
+- **Catch the exception in the graph and stop there:** Rejected. That would leave the manual loop with a different validation, retry and approval policy, and would couple the fix to the native tool node instead of putting one wrapper around it.
+- **Per-tool try/except in each tool:** Scatters policy across every tool and makes "is this call allowed?" unanswerable in one place.
+
+**Trade-offs and boundaries:**
+- The per-call timeout stops the guard waiting; it cannot kill a Python thread. A non-cooperative tool may continue in the background. True isolation needs a process boundary, which is not part of this task.
+- The default idempotency store is in-process. `SqliteIdempotencyStore` makes records survive a restart, but it is not a distributed lock; SQLite's primary key plus `INSERT OR IGNORE` gives first-writer-wins.
+- Approval is explicit state (`ApprovalStore`), not an interactive graph interrupt. A caller approves an action key before it runs, or between runs.
+- Model latency and provider spend are outside the guard. The observation-token cap is an estimated context bound, not a billing measure.
+- `GuardedTool.invoke()` returns a `ToolMessage` when given a LangGraph tool-call dict and a string otherwise. That is the protocol the tool node expects, but it is a deliberate change from a plain `BaseTool` and is covered by execution tests.
 
 ---
 
@@ -212,10 +246,15 @@ main.py
   ├── tools/__init__.py  (tool registry)
   │   ├── tools/system.py
   │   ├── tools/web.py
-  │   └── tools/database.py
+  │   ├── tools/database.py
+  │   └── tools/actions.py   (consequential demo action)
   └── agent/__init__.py  (agent registry)
-      ├── agent/simple.py  ← uses tools dict
-      └── agent/graph.py   ← uses tools list + models/state.py
+      ├── agent/simple.py  ← uses tools dict + guard
+      └── agent/graph.py   ← uses tools list + models/state.py + guard
+
+guard.py
+  ├── bounds.py          (limits, budget, stop reasons)
+  └── idempotency.py     (in-memory and SQLite stores)
 ```
 
 Key property: **arrows point in the direction of dependency.** Tools never import agents. Agents never import specific tools. Configuration is imported by everything but imports nothing (except pydantic-settings).

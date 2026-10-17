@@ -34,6 +34,7 @@ import argparse
 import logging
 import uuid
 
+from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
 from gem_agentic_ai.agent.graph import build_agent
@@ -102,7 +103,7 @@ def _get_tools() -> list:
     ]
 
 
-def _get_tools_by_name() -> dict[str, object]:
+def _get_tools_by_name() -> dict[str, BaseTool]:
     """Build a name-to-tool lookup for the simple ReAct loop.
 
     The simple agent does not use LangGraph's tool routing — it
@@ -229,8 +230,10 @@ def run_simple_demo() -> None:
     question = input("👤 Enter your query: ")
     print("\n🧠 Processing (Simple ReAct loop)...\n")
 
-    answer = run_simple_agent(llm_with_tools, question, tools_by_name)
-    print(f"\n🤖 Final Answer: {answer}")
+    result = run_simple_agent(llm_with_tools, question, tools_by_name)
+    print(f"\n🤖 Final Answer: {result.answer}")
+    if result.budget.stop_reason is not None:
+        print(f"   Stopped early: {result.budget.stop_reason.value}")
 
 
 # ── CLI argument parsing ──────────────────────────────────────

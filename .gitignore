@@ -8,6 +8,7 @@ chroma_langchain_db/
 # Test & coverage artefacts
 .coverage
 htmlcov/
+artifacts/
 
 # IDE
 .vscode/

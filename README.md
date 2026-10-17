@@ -2,12 +2,17 @@
 
 [![ci](https://github.com/koatedevopskpai/gem-agentic-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/koatedevopskpai/gem-agentic-ai/actions/workflows/ci.yml)
 
-A production-grade LLM agent orchestration framework demonstrating two architectural approaches to the ReAct (Reasoning + Acting) pattern:
+An LLM agent orchestration framework demonstrating two architectural approaches to the ReAct (Reasoning + Acting) pattern:
 
-1. **Simple ReAct Loop** — a manual thought-action-observation loop (~50 lines) showing the core pattern from first principles.
+1. **Simple ReAct Loop** — a manual thought-action-observation loop showing the core pattern from first principles.
 2. **LangGraph State Machine** — a formal state graph with checkpointing, streaming, and typed state management.
 
-Both implementations consume the same shared tool library, illustrating dependency inversion and the power of abstracting tool interfaces.
+Both implementations consume the same shared tool library and the same
+`ToolGuard`, illustrating dependency inversion and one execution policy for
+both paths. The guard bounds every tool call: schema validation, allowlist,
+timeouts, call and token budgets, a per-tool circuit breaker, retry rules,
+idempotency and explicit approval for consequential actions. See
+[Bounded Execution](#bounded-execution) for what is and is not covered.
 
 ---
 
@@ -46,9 +51,71 @@ Both implementations consume the same shared tool library, illustrating dependen
 | Configuration | `pydantic-settings` | Type-safe, validated env vars fail fast at startup |
 | Web search | `duckduckgo_search` direct | Avoids deprecated `langchain-community` wrapper |
 | Agent orchestration | LangGraph `create_agent` | Formal state machine with persistence and streaming |
+| Tool execution | Shared `ToolGuard` | One policy for both agent paths: validate, bound, approve, de-duplicate |
+| Idempotency | In-memory or SQLite store | A replayed action produces one logical result; SQLite survives a restart |
 | CLI | `argparse` (stdlib) | Zero dependencies; explicit and easy to follow |
 | Logging | `logging` module | Structured output with levels; production standard |
 | Testing | `pytest` + `pytest-cov` | Offline suite with a scripted model; coverage reported by CI, not gated |
+
+---
+
+## Bounded Execution
+
+A model can ask for a tool call, but it cannot decide whether the call is
+allowed. Every call on both agent paths passes through `ToolGuard`, which
+applies one policy and records the outcome in an audit trail.
+
+| Bound | Default | When reached |
+|-------|---------|--------------|
+| Wall-clock deadline for the run | 30 s | call refused, `deadline_exceeded` |
+| Per-call timeout | 5 s | error observation, `timeout` |
+| Total tool calls | 12 | call refused, `call_budget_exceeded` |
+| Calls per tool | 4 | that tool refused, `tool_call_limit` |
+| Attempts per call | 2 | retryable errors only; unknown exceptions run once |
+| Consecutive failures per tool | 3 | circuit opens, `circuit_open` |
+| Accumulated observation size | ~4,000 tokens (estimated) | call refused, `token_budget_exceeded` |
+| Serialised argument size | 4,000 bytes | call refused, `arguments_too_large` |
+
+Invalid arguments are refused before the tool runs. A tool without a Pydantic
+argument schema is refused rather than executed unvalidated. Consequential
+tools require an explicit approval for their action key and are never retried
+automatically after a timeout.
+
+```python
+from gem_agentic_ai.agent.simple import run_simple_agent
+from gem_agentic_ai.bounds import ToolLimits
+from gem_agentic_ai.guard import ToolGuard
+
+guard = ToolGuard(
+    ToolLimits(
+        deadline_seconds=20,
+        max_total_calls=6,
+        max_calls_per_tool=2,
+        consequential_tools=frozenset({"create_support_ticket"}),
+    )
+)
+result = run_simple_agent(llm_with_tools, question, tools_by_name, guard=guard)
+
+print(result.answer)
+print(result.budget.stop_reason)  # None, or the first bound that was hit
+```
+
+The first refusal sets `result.budget.stop_reason` and is never cleared, so a
+model that answers after a refused call cannot hide the fact that a call was
+cut off. `result.budget.records` lists every call with its status, attempt
+count and duration.
+
+An action can be replayed safely. The guard checks an idempotency store before
+executing and records the completed result afterwards, keyed by
+`(tool, action key)`. `InMemoryIdempotencyStore` covers one process;
+`SqliteIdempotencyStore` survives a restart.
+
+**What this does not establish.** The per-call timeout stops the guard
+waiting; it does not kill the tool. Python cannot interrupt a thread, so a
+non-cooperative tool may keep running after its result is discarded. Model
+latency and provider spend are outside this layer. `MemorySaver` remains
+in-process only. The guard is an execution policy, not a security sandbox.
+The design and its limits are recorded in [docs/A03.md](docs/A03.md).
 
 ---
 
@@ -118,16 +185,20 @@ python -m gem_agentic_ai demo --verbose
 src/gem_agentic_ai/
 ├── __init__.py          # Package marker
 ├── __main__.py          # python -m entry point
+├── bounds.py            # ExecutionBudget, ToolLimits, stop reasons
+├── guard.py             # ToolGuard and GuardedTool (validation, retries, approval)
+├── idempotency.py       # In-memory and SQLite idempotency stores
 ├── config.py            # pydantic-settings configuration
 ├── main.py              # CLI argument parsing and mode dispatch
 ├── tools/
 │   ├── __init__.py      # Tool registry / re-exports
 │   ├── system.py        # Standard-library tools (clock, calculator)
 │   ├── web.py           # DuckDuckGo web search
-│   └── database.py      # In-memory SQLite employee database
+│   ├── database.py      # In-memory SQLite employee database
+│   └── actions.py       # Consequential demo action (approval + idempotency)
 ├── agent/
 │   ├── __init__.py      # Agent registry / re-exports
-│   ├── simple.py        # Manual ReAct loop (~50 lines)
+│   ├── simple.py        # Manual ReAct loop
 │   └── graph.py         # LangGraph state machine builder
 └── models/
     ├── __init__.py      # Model registry / re-exports
@@ -172,9 +243,9 @@ Detailed design rationale for every major decision is documented in [docs/ARCHIT
 | Persistence | None (stateless) | MemorySaver (in-memory) |
 | Streaming | Blocking (full response) | Event-based streaming |
 | Tool routing | Manual `if/else` | Built-in conditional edges |
-| Human-in-the-loop | No | Yes (via interrupt) |
-| Code complexity | ~50 lines (pedagogical) | ~30 lines (builder) |
-| Production readiness | Learning/teaching | Production deployment |
+| Execution bounds | Shared `ToolGuard` | Shared `ToolGuard` |
+| Approval gate | Explicit approval for consequential tools | Explicit approval for consequential tools |
+| Code complexity | Small, single-file loop (pedagogical) | Graph builder plus guard integration |
 
 ---
 
