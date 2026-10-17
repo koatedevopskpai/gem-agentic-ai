@@ -92,12 +92,12 @@ Result on 17 October 2026, CPython 3.11.9, venv with the pinned dependencies
 including `langgraph-checkpoint-sqlite==3.1.2`, no `.env`:
 
 ```
-collected 146 items / 1 deselected / 145 selected
-145 passed, 1 deselected in 7.97s
-TOTAL  868 statements  55 missed  94%
+collected 149 items / 1 deselected / 148 selected
+148 passed, 1 deselected in 6.85s
+TOTAL  868 statements  52 missed  94%
 ```
 
-The new module in this task is `persistence.py` (98%). A03's modules remain
+The new module in this task is `persistence.py` (100%). A03's modules remain
 at `bounds.py` (98%), `guard.py` (93%), `idempotency.py` (100%) and
 `tools/actions.py` (100%). `main.py` remains at 76% because the interactive
 `run_chat` / `run_simple_demo` bodies are not executed; `agent/graph.py` is
