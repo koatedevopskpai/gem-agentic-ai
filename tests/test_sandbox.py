@@ -129,8 +129,17 @@ def test_cpu_limit_stops_a_spin_before_the_wall_clock():
 
 
 def test_memory_limit_stops_a_hog():
+    # The submission must HOLD the allocation. Without the hold the process
+    # allocates 512 MiB and finishes in ~65 ms, while the POSIX watchdog samples
+    # resident memory every 50 ms - so whether the limit is observed becomes a
+    # race. That is why the same commit passed in a container and failed on the
+    # GitHub runner. Holding the memory makes the assertion deterministic: the
+    # watchdog must fire, or the wall clock must, before the hold ends.
     sample = """\
+import time
+
 x = bytearray(512 * 1024 * 1024)
+time.sleep(30)          # keep the pages resident so the sampler must see them
 
 
 def slugify(text):
@@ -138,6 +147,7 @@ def slugify(text):
 """
     result = run_submission(sample, limits=SandboxLimits(memory_mb=64, wall_seconds=20))
     assert result.status != "passed"
+    # "killed" on POSIX (RSS watchdog), "error" on Windows (Job Object).
     assert result.status in {"error", "killed"}
     assert result.duration_seconds < 20
 
